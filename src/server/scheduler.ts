@@ -7,7 +7,7 @@ import { webFetch } from './web-fetch.js';
 
 export interface SchedulerClock { now(): number; setTimeout(fn: () => void, ms: number): any; clearTimeout(timer: any): void }
 const clockDefault: SchedulerClock = { now: Date.now, setTimeout, clearTimeout };
-type Active = { runtime: AgentRuntime; turnId: string; deadline: any; settled: Promise<RuntimeTurnResult>; sessionId: string; deliveryIds: string[]; inputCursor: number };
+type Active = { runtime: AgentRuntime; turnId: string; deadline: any; settled: Promise<RuntimeTurnResult>; sessionId: string; deliveryIds: string[]; inputCursor: number; acceptsSteering: boolean };
 const messageArgs = z.object({ body: z.string().trim().min(1).max(20000), reply_to: z.string().optional() });
 
 export class Scheduler {
@@ -35,9 +35,17 @@ export class Scheduler {
   }
   private cancel(key: string) { const timer = this.timers.get(key); if (timer !== undefined) this.clock.clearTimeout(timer.id); this.timers.delete(key); }
   private scheduleDelivery(sessionId: string, agentId: string, delay = 75) {
+    if (this.active.get(agentId)?.acceptsSteering === false) return; // Completion drains the mailbox after cleanup.
     const key = `dm:${agentId}`;
     // Batch arrivals against the first deadline so ongoing chat cannot starve delivery.
     this.schedule(key, () => { void this.deliver(sessionId, agentId); }, delay, true);
+  }
+  private async interruptAgent(agentId: string) {
+    const active = this.active.get(agentId);
+    if (!active) return;
+    active.acceptsSteering = false;
+    this.cancel(`dm:${agentId}`);
+    await active.runtime.interrupt();
   }
   private guard(session: Session, admittingTurn = true): string | null {
     if (admittingTurn && session.turnCount >= session.settings.maxTurns) return 'Turn limit reached';
@@ -55,7 +63,7 @@ export class Scheduler {
       if (agent.kind !== 'agent') throw new Error('Only agents can be paused');
       const pause = action === 'pause-agent';
       this.store.updateParticipant(sessionId, agentId, { pausedByHuman: pause, status: pause ? 'paused' : 'idle' });
-      if (pause) await this.active.get(agentId)?.runtime.interrupt();
+      if (pause) await this.interruptAgent(agentId);
       else if (session.status !== 'paused') { void this.deliver(sessionId, agentId); this.kick(sessionId); }
       return;
     }
@@ -90,7 +98,7 @@ export class Scheduler {
     }
     await Promise.all(snapshot.participants.filter(p => p.kind === 'agent').map(async agent => {
       this.store.updateParticipant(sessionId, agent.id, { status: 'paused' });
-      await this.active.get(agent.id)?.runtime.interrupt();
+      await this.interruptAgent(agent.id);
     }));
   }
   onMessage(message: Message) {
@@ -196,13 +204,13 @@ export class Scheduler {
     this.store.updateParticipant(sessionId, agentId, { status: 'thinking' });
     let settle!: (result: RuntimeTurnResult) => void;
     const settled = new Promise<RuntimeTurnResult>(resolve => { settle = resolve; });
-    const active: Active = { runtime, turnId: '', deadline: null, settled, sessionId, deliveryIds: input.deliveryIds, inputCursor: input.cursor };
+    const active: Active = { runtime, turnId: '', deadline: null, settled, sessionId, deliveryIds: input.deliveryIds, inputCursor: input.cursor, acceptsSteering: true };
     this.active.set(agentId, active);
     const deliveryMarker = `input-${randomUUID()}`;
     // Uncertain until the runtime accepts a turn; never silently replay after a crash.
     this.store.markDeliveries(input.deliveryIds, 'uncertain', deliveryMarker);
     active.deadline = this.clock.setTimeout(() => {
-      void runtime.interrupt();
+      void this.interruptAgent(agentId);
       this.store.updateParticipant(sessionId, agentId, { pausedByHuman: true, status: 'paused' });
       this.system(agent, active.turnId || deliveryMarker, 'Turn deadline reached', 'interrupted');
       void runtime.close();
@@ -216,12 +224,14 @@ export class Scheduler {
         this.store.updateParticipant(sessionId, agentId, { groupCursor: Math.max(this.store.getParticipant(sessionId, agentId).groupCursor, input.cursor) });
       }
     } catch (error) { result = { turnId: active.turnId, status: 'failed', error: String(error) }; }
-    finally { this.clock.clearTimeout(active.deadline); this.active.delete(agentId); }
+    finally { this.clock.clearTimeout(active.deadline); active.acceptsSteering = false; }
     this.system(agent, result.turnId || deliveryMarker, result.error || (result.status === 'completed' ? 'Turn completed' : `Turn ${result.status}`), result.status);
+    // Reserve the slot until an interrupted runtime is fully closed and removed.
+    if (result.status !== 'completed') { await runtime.close(); this.runtimes.delete(agentId); }
+    this.active.delete(agentId);
     const current = this.store.getParticipant(sessionId, agentId);
     const paused = this.store.getSession(sessionId).status === 'paused' || current.pausedByHuman;
     this.store.updateParticipant(sessionId, agentId, { status: paused ? 'paused' : result.status === 'failed' ? 'failed' : 'idle' });
-    if (result.status !== 'completed') { await runtime.close(); this.runtimes.delete(agentId); }
     settle(result);
     if (result.status === 'failed') await this.pause(sessionId, `${agent.name}: ${result.error || 'Agent failed'}`);
     else if (!paused) this.scheduleDelivery(sessionId, agentId);
@@ -239,7 +249,7 @@ export class Scheduler {
     try {
       const active = this.active.get(agentId);
       if (active) {
-        if (!active.turnId) return; // Initialization will be followed by a mailbox flush.
+        if (!active.acceptsSteering || !active.turnId) return; // Initialization or cleanup will flush the mailbox.
         const input = this.input(this.store.snapshot(sessionId), this.store.getParticipant(sessionId, agentId), 'dm');
         this.store.markDeliveries(input.deliveryIds, 'uncertain', active.turnId);
         const accepted = await active.runtime.steer({ text: input.text, messageId: `input-${randomUUID()}` });

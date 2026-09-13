@@ -86,7 +86,7 @@ export class CodexRuntime implements AgentRuntime {
   }
   async steer(input: RuntimeInput): Promise<boolean> {
     const turnId = this.active?.turnId;
-    if (!turnId || !this.rpc) return false;
+    if (this.stopping || !turnId || !this.rpc) return false;
     try {
       await this.rpc.request('turn/steer', { threadId: this.threadId, expectedTurnId: turnId, clientUserMessageId: input.messageId, input: [{ type: 'text', text: input.text, text_elements: [] }] });
       return true;

@@ -66,6 +66,8 @@ for (const identifierSource of ['response', 'notification'] as const) {
         await new Promise<void>(resolve => setImmediate(resolve));
       }
       assert.ok(requests.some(item => item.method === 'turn/interrupt' && item.params.turnId === 'late-turn'), 'the already-paused turn must be interrupted as soon as its ID is known');
+      assert.equal(await runtime.steer({ text: 'Wait for a fresh turn.', messageId: 'after-interrupt' }), false);
+      assert.equal(requests.filter(item => item.method === 'turn/steer').length, 0, 'a late turn ID must not re-enable steering after interruption');
     } finally {
       startResponse.resolve({ turn: { id: 'late-turn' } });
       await runtime.close();

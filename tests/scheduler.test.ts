@@ -51,6 +51,8 @@ class ControlledRuntime implements AgentRuntime {
   interrupts = 0;
   closed = false;
   acceptsSteering = true;
+  interruptCompletesTurn = true;
+  closeBarrier?: Promise<void>;
   constructor(readonly agent: Participant, readonly hooks: RuntimeHooks, private calls: Invocation[]) {
     hooks.onThread(`context:${agent.id}`);
   }
@@ -73,8 +75,8 @@ class ControlledRuntime implements AgentRuntime {
     this.current = undefined;
     resolve({ turnId, status, error });
   }
-  async interrupt() { this.interrupts++; if (this.current) this.finish('interrupted'); }
-  async close() { this.closed = true; if (this.current) this.finish('interrupted'); }
+  async interrupt() { this.interrupts++; if (this.interruptCompletesTurn && this.current) this.finish('interrupted'); }
+  async close() { this.closed = true; if (this.closeBarrier) await this.closeBarrier; if (this.current) this.finish('interrupted'); }
   tool(name: string, args: unknown, callId = `call:${this.calls.length}:${name}`) { return this.hooks.onTool(name, args, callId); }
 }
 
@@ -289,6 +291,47 @@ test('pausing interrupts current work, queues new DMs, and resume delivers them 
     assert.equal(ctx.calls.filter(call => call.input.directMessages.some(message => message.id === dm.id)).length, 1);
   } finally { await ctx.close(); }
 });
+
+for (const scope of ['session', 'agent', 'deadline'] as const) {
+  for (const resumeTiming of ['before-completion', 'during-cleanup'] as const) {
+    test(`${scope} resume ${resumeTiming} holds DMs until the interrupted turn and runtime cleanup both settle`, async () => {
+      const ctx = setup({ turnTimeoutMs: 500 });
+      let releaseClose!: () => void;
+      const closeBarrier = new Promise<void>(resolve => { releaseClose = resolve; });
+      try {
+        await ctx.start();
+        const first = ctx.calls[0];
+        first.runtime.interruptCompletesTurn = false; // Interrupt acknowledgment precedes turn/completed.
+        first.runtime.closeBarrier = closeBarrier;
+        if (scope === 'deadline') await ctx.clock.advance(500);
+        else await ctx.scheduler.control(ctx.sessionId, scope === 'session' ? 'pause' : 'pause-agent', scope === 'agent' ? first.agentId : undefined);
+        const pausedDM = ctx.send('Handle this after resuming.', first.agentId);
+        if (resumeTiming === 'during-cleanup') await ctx.finish(0, 'interrupted');
+        await ctx.scheduler.control(ctx.sessionId, scope === 'session' ? 'resume' : 'resume-agent', scope === 'session' ? undefined : first.agentId);
+        await ctx.clock.advance(75);
+        const resumedDM = ctx.send('This arrived after Resume.', first.agentId);
+        await ctx.clock.advance(100);
+        assert.equal(first.runtime.steers.length, 0, 'an interrupted turn must never receive resumed mailbox inputs');
+        assert.equal(ctx.store.pendingDeliveries(ctx.sessionId, first.agentId).length, 2);
+
+        if (resumeTiming === 'before-completion') await ctx.finish(0, 'interrupted');
+        await ctx.clock.advance(100);
+        assert.equal(ctx.calls.filter(call => call.agentId === first.agentId).length, 1, 'the slot stays reserved until the old runtime finishes closing');
+        assert.equal(ctx.store.pendingDeliveries(ctx.sessionId, first.agentId).length, 2, 'cleanup must not consume the pending mailbox');
+
+        releaseClose();
+        await flush();
+        await ctx.clock.advance(100);
+        const fresh = ctx.calls.find(call => call.agentId === first.agentId && call.turnId !== first.turnId);
+        assert.ok(fresh, 'queued DMs must start a fresh turn after cleanup');
+        assert.notEqual(fresh.runtime, first.runtime, 'an interrupted runtime must be replaced before reuse');
+        assert.deepEqual(fresh.input.directMessages.map(message => message.id), [pausedDM.id, resumedDM.id]);
+        assert.deepEqual(ctx.state().deliveries.map(delivery => [delivery.state, delivery.turnId]), [['accepted', fresh.turnId], ['accepted', fresh.turnId]]);
+        assert.equal(ctx.calls.filter(call => call.agentId === first.agentId).length, 2, 'each queued message enters only one fresh turn');
+      } finally { releaseClose(); await ctx.close(); }
+    });
+  }
+}
 
 test('failed turns pause the session and record a failed opportunity rather than a pass or perpetual running slot', async () => {
   const ctx = setup();
