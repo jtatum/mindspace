@@ -38,6 +38,11 @@ const controlSchema = z.object({
   agentId: z.string().uuid().optional(),
 }).strict().refine(value => !value.action.endsWith('-agent') || Boolean(value.agentId), 'Agent controls require agentId');
 
+function setIdentityCookie(request: FastifyRequest, reply: FastifyReply, token: string) {
+  reply.header('Set-Cookie', `mindspace_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${request.protocol === 'https' ? '; Secure' : ''}`);
+  reply.header('Cache-Control', 'no-store');
+}
+
 export async function buildApp({ store, scheduler, health, webRoot }: AppOptions) {
   const app = Fastify({ logger: false, bodyLimit: 128 * 1024 });
   const identities = new WeakMap<FastifyRequest, { id: string; name: string }>();
@@ -87,13 +92,15 @@ export async function buildApp({ store, scheduler, health, webRoot }: AppOptions
     const identity = token ? store.authenticate(token) : null;
     if (!identity) return reply.code(401).send({ error: 'Create or restore your browser identity first' });
     identities.set(request, identity);
+    // Saved bearer identities outlive browser cookies. Restore the same identity
+    // for native EventSource, which cannot attach the Authorization header.
+    if (authorization && token) setIdentityCookie(request, reply, token);
   });
 
   app.get('/api/health', async () => getHealth());
   app.post('/api/identities', async (request, reply) => {
     const identity = store.createIdentity(identitySchema.parse(request.body).name);
-    reply.header('Set-Cookie', `mindspace_token=${identity.token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${request.protocol === 'https' ? '; Secure' : ''}`);
-    reply.header('Cache-Control', 'no-store');
+    setIdentityCookie(request, reply, identity.token);
     return reply.code(201).send(identity);
   });
   app.get('/api/sessions', async () => store.listSessions());

@@ -12,7 +12,7 @@ A local protocol probe found that feature flags alone did not remove tools force
 
 ## Automated verification
 
-The final full automated suite passed **57/57 tests**, and the production build passed. It covers:
+The final full automated suite passed **68/68 tests**, and the production build passed. It covers:
 
 - Durable identities and token hashing, session reopen, transaction rollback, sender authorization, canonical DM pairs, idempotent messages, and DM delivery isolation. Recovery requires the exact completed turn lifecycle marker; a completed input or compaction item alone cannot falsely confirm an unfinished delivery.
 - Cookie/bearer authentication, input and origin checks, ordered SSE replay followed by live delivery, and cross-session event isolation. Fresh review added strict loopback Host validation before every API exemption so a hostile DNS name cannot mint an identity or read local data by supplying a matching Origin.
@@ -80,6 +80,8 @@ Subsequent PR feedback identified that authenticated observers could invoke cont
 Further PR feedback identified that rapid Resume could steer queued DMs into a turn still being interrupted. Interrupted turns now remain non-steerable and retain their active slot until runtime cleanup completes. Pending DMs then enter a fresh turn. Six clock-controlled regressions cover session pause, agent pause, and deadline interruption, with Resume both before completion and during cleanup; they verify pending receipts, no steering into the old turn, no reuse of a closing runtime, and one delivery into the fresh turn. Adapter checks also reject steering when a turn ID arrives after interruption. These are deterministic offline checks.
 
 A separate in-flight receipt race is also reconciled: successful submission receipts on interrupted or failed turns become uncertain, including receipts arriving after cleanup. Only positively acknowledged IDs can become accepted when their original turn completes normally; unresolved RPCs stay uncertain. Explicit rejection returns a DM to pending, while Resume never automatically replays uncertain submissions. Twelve additional offline regressions cover pause/deadline timing, initial and steering inputs, late turn-start events, normal completion, failures, explicit rejection, and unknown RPC outcomes. The inspector describes uncertainty about processing and advises reviewing the conversation before resending.
+
+Saved browser identities now restore the HttpOnly event-stream cookie on authenticated bearer requests, so clearing or expiring the cookie does not strand live updates. Stream failures close the old connection, refresh the snapshot with the saved credential, and reconnect from its cursor with exponential delays capped at 30 seconds. Session changes cancel pending work, and only an open stream reports connectivity. API regressions cover missing/stale cookies, rejected credentials, unchanged membership and audit state, and cookie-authenticated SSE replay/live delivery. Nine deterministic client regressions cover recovery, retry timing, coalescing and stale callbacks; this fix did not require another live model run.
 
 ## Limits and follow-on validation
 

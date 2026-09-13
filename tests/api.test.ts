@@ -47,6 +47,36 @@ test('HTTP identities authorize commands; unjoined humans can observe but must j
   } finally { await ctx.close(); }
 });
 
+test('restored bearer identities renew the event-stream cookie without changing session state', async () => {
+  const ctx = await setup();
+  try {
+    const base = `/api/sessions/${ctx.snapshot.session.id}`;
+    const before = ctx.store.snapshot(ctx.snapshot.session.id);
+    assert.equal((await ctx.app.inject(`${base}/events`)).statusCode, 401);
+    for (const cookie of [undefined, 'mindspace_token=expired']) {
+      const response = await ctx.app.inject({ url: base, headers: { ...ctx.headers, ...(cookie ? { cookie } : {}) } });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers['set-cookie'], `mindspace_token=${ctx.identity.token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000`);
+      assert.equal(response.headers['cache-control'], 'no-store');
+      assert.deepEqual(response.json<Snapshot>(), before);
+      assert.deepEqual(ctx.store.snapshot(ctx.snapshot.session.id), before, 'restoring authentication must preserve the participant and audit record');
+    }
+  } finally { await ctx.close(); }
+});
+
+test('invalid bearer credentials cannot renew cookies or fall back to a valid cookie', async () => {
+  const ctx = await setup();
+  try {
+    for (const authorization of ['Bearer invalid', 'Basic invalid', `Bearer ${ctx.identity.token} extra`]) {
+      const response = await ctx.app.inject({
+        url: '/api/sessions', headers: { authorization, cookie: `mindspace_token=${ctx.identity.token}` },
+      });
+      assert.equal(response.statusCode, 401);
+      assert.equal(response.headers['set-cookie'], undefined);
+    }
+  } finally { await ctx.close(); }
+});
+
 for (const authentication of ['bearer', 'cookie'] as const) {
   test(`${authentication} observers must join the target session before any control reaches the scheduler`, async () => {
     const ctx = await setup();
@@ -149,7 +179,13 @@ test('SSE replays from a snapshot cursor then streams committed events without c
     const missed = store.sendMessage(sessionId, identity.id, { body: 'Before connect', requestId: 'missed' });
     const unrelated = store.createSession(input, identity, 'simulation');
     const address = await app.listen({ port: 0, host: '127.0.0.1' });
-    const response = await fetch(`${address}/api/sessions/${sessionId}/events?after=${snapshot.eventSeq}`, { headers: { cookie: `mindspace_token=${identity.token}` }, signal: controller.signal });
+    // A browser restored from localStorage has a bearer token but may have no cookie.
+    const restored = await fetch(`${address}/api/sessions/${sessionId}`, { headers: ctx.headers, signal: controller.signal });
+    assert.equal(restored.status, 200);
+    const cookie = restored.headers.get('set-cookie');
+    assert.ok(cookie, 'restoring the saved identity must also authenticate native EventSource');
+    await restored.json();
+    const response = await fetch(`${address}/api/sessions/${sessionId}/events?after=${snapshot.eventSeq}`, { headers: { cookie: cookie.split(';')[0] }, signal: controller.signal });
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type')!, /text\/event-stream/);
     store.sendMessage(unrelated.session.id, identity.id, { body: 'Other session', requestId: 'unrelated' });

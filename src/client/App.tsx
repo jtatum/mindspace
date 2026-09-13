@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type R
 import { ArrowDown, ArrowDownToLine, ArrowRight, ArrowUp, Bot, Check, ChevronDown, ChevronRight, Circle, Clock3, Code2, Compass, ExternalLink, Eye, Globe2, Hash, LoaderCircle, Menu, MessageCircle, MessagesSquare, MoreHorizontal, Pause, Play, Plus, Radio, Settings2, Sparkles, Square, Terminal, Users, Workflow, X } from 'lucide-react';
 import { DEFAULT_SETTINGS, type Activity, type Conversation, type CreateSessionInput, type Identity, type Message, type Participant, type RuntimeHealth, type Session, type Snapshot } from '../shared/types';
 import { api, downloadSession, readIdentity, saveIdentity } from './api';
+import { subscribeSessionEvents } from './session-events';
 
 const agentColors = ['#d5e5a7', '#aecfcb', '#d9bd9f', '#c1b5df', '#a6c3db'];
 const suggestedAgents = [
@@ -86,24 +87,14 @@ export default function App() {
   const sessionId = snapshot?.session.id;
   useEffect(() => {
     if (!sessionId || !identity) { setConnected(false); return; }
-    let active = true; let timer: ReturnType<typeof setTimeout> | undefined; let fetching = false; let dirty = false;
-    const refresh = () => {
-      dirty = true;
-      if (fetching || timer || !active) return;
-      timer = setTimeout(() => {
-        timer = undefined; fetching = true; dirty = false;
-        void api<Snapshot>(`/sessions/${sessionId}`, identity)
-          .then(value => { if (active) { receiveSnapshot(value); setConnected(true); } })
-          .catch(() => { if (active) setConnected(false); })
-          .finally(() => { fetching = false; if (active && dirty) refresh(); });
-      }, 100);
-    };
-    const source = new EventSource(`/api/sessions/${sessionId}/events?after=${cursorRef.current}`);
-    source.onopen = () => { if (active) { setConnected(true); refresh(); } };
-    source.onerror = () => { if (active) setConnected(false); };
-    source.addEventListener('update', refresh);
-    source.onmessage = refresh;
-    return () => { active = false; source.close(); clearTimeout(timer); };
+    return subscribeSessionEvents({
+      sessionId,
+      getCursor: () => cursorRef.current,
+      fetchSnapshot: signal => api<Snapshot>(`/sessions/${sessionId}`, identity, { signal }),
+      receiveSnapshot,
+      setConnected,
+      isCurrent: () => sessionRef.current === sessionId,
+    });
   }, [sessionId, identity, receiveSnapshot]);
 
   async function createSession(input: CreateSessionInput) {
@@ -123,7 +114,9 @@ export default function App() {
     if (!snapshot || !identity) throw new Error('Join a session before sending a message.');
     const currentId = snapshot.session.id;
     await api(`/sessions/${currentId}/messages`, identity, { method: 'POST', body: JSON.stringify({ body, ...target, requestId }) });
-    void api<Snapshot>(`/sessions/${currentId}`, identity).then(receiveSnapshot).catch(() => setConnected(false));
+    void api<Snapshot>(`/sessions/${currentId}`, identity).then(receiveSnapshot).catch(() => {
+      // The stream subscription owns refresh recovery and connection status.
+    });
   }
   function selectConversation(value: ConversationSelection) { setSelection(value); setSidebarOpen(false); }
   const agents = snapshot?.participants.filter(p => p.kind === 'agent') ?? [];
