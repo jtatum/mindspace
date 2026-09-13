@@ -68,6 +68,8 @@ Pause session cancels future scheduling and interrupts active turns; messages ma
 
 Session limits cover elapsed time, round count, turns, and token usage. Reaching a limit pauses the session with a reason. Token limits are checked against reported usage and may overshoot by in-flight work. These controls also bound DM-only conversations. Keep delay, deadlines, and limits visible in session settings and recorded with the experiment.
 
+An exhausted turn budget blocks new turn admission and is also enforced at completion, including DM work in idle or cooldown sessions. The round scheduler records completed opportunities before applying the pause; opportunities that never started remain skipped. Session pause retains its usual behavior of interrupting other active work.
+
 ## Persistent context and application records
 
 Use one Codex thread per agent per Mindspace session. Group and DM conversations are channels inside that agent's inputs, not separate model contexts. Browser navigation never creates or resets an agent thread.

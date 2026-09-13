@@ -8,7 +8,7 @@ The original work items and completion criteria below remain useful acceptance t
 
 ## Current implementation status
 
-The production build passed. The final automated run passed **83/83 tests**, including storage/API integration, controllable scheduler/runtime tests, a credential-free Codex tool-policy probe, and review regressions.
+The production build passed. The final automated run passed **91/91 tests**, including storage/API integration, controllable scheduler/runtime tests, a credential-free Codex tool-policy probe, and review regressions.
 
 | Items | Status | Evidence or remaining detail |
 | --- | --- | --- |

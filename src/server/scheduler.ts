@@ -252,10 +252,13 @@ export class Scheduler {
     if (result.status !== 'completed') { await runtime.close(); this.runtimes.delete(agentId); }
     this.active.delete(agentId);
     const current = this.store.getParticipant(sessionId, agentId);
-    const paused = this.store.getSession(sessionId).status === 'paused' || current.pausedByHuman;
+    const session = this.store.getSession(sessionId);
+    const paused = session.status === 'paused' || current.pausedByHuman;
     this.store.updateParticipant(sessionId, agentId, { status: paused ? 'paused' : result.status === 'failed' ? 'failed' : 'idle' });
     settle(result);
     if (result.status === 'failed') await this.pause(sessionId, `${agent.name}: ${result.error || 'Agent failed'}`);
+    // An active round advancer must record its opportunity outcome before pausing.
+    else if (kind === 'dm' && !this.advancing.has(sessionId) && session.status !== 'paused' && session.turnCount >= session.settings.maxTurns) await this.pause(sessionId, 'Turn limit reached');
     else if (!paused) this.scheduleDelivery(sessionId, agentId);
     return result;
   }
@@ -319,6 +322,7 @@ export class Scheduler {
         agent = this.store.getParticipant(sessionId, agent.id);
         if (agent.pausedByHuman) { opportunity.status = 'skipped'; this.store.saveRound(round); continue; }
         snapshot = this.store.snapshot(sessionId);
+        if (snapshot.session.turnCount >= snapshot.session.settings.maxTurns) { await this.pause(sessionId, 'Turn limit reached'); return; }
         opportunity.status = 'running'; opportunity.inputSequence = this.groupSequence(snapshot); this.store.saveRound(round);
         const beforeSequence = opportunity.inputSequence;
         const result = await this.runAgent(sessionId, agent.id, 'round');
@@ -331,6 +335,7 @@ export class Scheduler {
       if (cancelled()) return;
       round.status = 'completed'; round.completedAt = this.iso(); this.store.saveRound(round);
       snapshot = this.store.snapshot(sessionId);
+      if (snapshot.session.turnCount >= snapshot.session.settings.maxTurns) { await this.pause(sessionId, 'Turn limit reached'); return; }
       if (round.number >= snapshot.session.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
       const pendingWork = snapshot.participants.some(p => p.kind === 'agent' && !p.pausedByHuman && (this.active.has(p.id) || this.store.pendingDeliveries(sessionId, p.id).length > 0));
       const allQuiet = round.opportunities.every(o => o.status === 'passed' || o.status === 'skipped');

@@ -631,6 +631,110 @@ test('group reads preserve skipped unread history and ignore empty pages and DM-
   } finally { await ctx.close(); }
 });
 
+for (const speaks of [false, true]) {
+  test(`finishing a ${speaks ? 'speaking' : 'quiet'} round at the turn limit pauses with completed outcomes`, async () => {
+    const ctx = setup({ maxTurns: 3 });
+    try {
+      await ctx.start(); await ctx.finish(0); await ctx.finish(1);
+      if (speaks) await ctx.calls[2].runtime.tool('send_group_message', { body: 'The final allowed turn can still contribute.' });
+      assert.equal(ctx.calls[2].runtime.interrupts, 0);
+      await ctx.finish(2);
+      assert.equal(ctx.state().session.status, 'paused');
+      assert.equal(ctx.state().session.reason, 'Turn limit reached');
+      assert.equal(ctx.state().session.nextRoundAt, null);
+      assert.equal(ctx.state().rounds[0].status, 'completed');
+      assert.deepEqual(ctx.state().rounds[0].opportunities.map(o => o.status), ['passed', 'passed', speaks ? 'spoke' : 'passed']);
+      assert.equal(ctx.state().rounds[0].opportunities[2].turnId, ctx.calls[2].turnId);
+      await ctx.clock.advance(1500);
+      assert.equal(ctx.calls.length, 3);
+    } finally { await ctx.close(); }
+  });
+}
+
+for (const state of ['idle', 'cooldown'] as const) {
+  test(`a DM completing at the turn limit pauses a session in ${state}`, async () => {
+    const ctx = setup({ maxTurns: 4 });
+    try {
+      await ctx.start();
+      if (state === 'cooldown') await ctx.calls[0].runtime.tool('send_group_message', { body: 'Continue after a delay.' });
+      await ctx.finish(0); await ctx.finish(1); await ctx.finish(2);
+      assert.equal(ctx.state().session.status, state);
+      const agentId = ctx.agents[0].id;
+      const delivered = ctx.send('Use the final allowed turn for this DM.', agentId);
+      await ctx.clock.advance(75);
+      assert.equal(ctx.calls[3].input.event, 'incoming_direct_messages');
+      assert.equal(ctx.calls[3].runtime.interrupts, 0);
+      await ctx.finish(3);
+      assert.equal(ctx.state().session.status, 'paused');
+      assert.equal(ctx.state().session.reason, 'Turn limit reached');
+      assert.equal(ctx.state().session.nextRoundAt, null);
+      assert.equal(ctx.state().deliveries.find(d => d.messageId === delivered.id)?.state, 'accepted');
+      assert.equal(ctx.state().activities.find(a => a.kind === 'system' && a.turnId === ctx.calls[3].turnId)?.status, 'completed');
+      const pending = ctx.send('This must remain queued.', agentId);
+      await ctx.clock.advance(1500);
+      assert.equal(ctx.calls.length, 4);
+      assert.equal(ctx.state().deliveries.find(d => d.messageId === pending.id)?.state, 'pending');
+    } finally { await ctx.close(); }
+  });
+}
+
+test('a deadline on the final DM turn enforces the session limit even though its agent is already paused', async () => {
+  const ctx = setup({ maxTurns: 4, turnTimeoutMs: 500 });
+  try {
+    await ctx.start(); await ctx.finish(0); await ctx.finish(1); await ctx.finish(2);
+    assert.equal(ctx.state().session.status, 'idle');
+    ctx.send('The final allowed DM turn will reach its deadline.', ctx.agents[0].id);
+    await ctx.clock.advance(75);
+    await ctx.clock.advance(500);
+    assert.equal(ctx.state().participants.find(p => p.id === ctx.agents[0].id)?.pausedByHuman, true);
+    assert.equal(ctx.state().session.status, 'paused');
+    assert.equal(ctx.state().session.reason, 'Turn limit reached');
+    assert.equal(ctx.state().deliveries[0].state, 'uncertain');
+    assert.equal(ctx.calls.length, 4);
+  } finally { await ctx.close(); }
+});
+
+test('a final-budget DM wakes the waiting advancer without admitting a phantom opportunity', async () => {
+  const ctx = setup({ maxTurns: 2 });
+  try {
+    await ctx.start();
+    ctx.send('Work while the first round opportunity runs.', ctx.agents[1].id);
+    await ctx.clock.advance(75);
+    await ctx.finish(0);
+    assert.equal(ctx.state().session.status, 'running', 'the existing busy agent is still completing its admitted DM turn');
+    assert.equal(ctx.calls.length, 2);
+    assert.equal(ctx.calls[1].runtime.interrupts, 0);
+    await ctx.finish(1);
+    assert.equal(ctx.state().session.reason, 'Turn limit reached');
+    assert.equal(ctx.state().rounds[0].status, 'interrupted');
+    assert.deepEqual(ctx.state().rounds[0].opportunities.map(o => o.status), ['passed', 'skipped', 'skipped']);
+    assert.deepEqual(ctx.state().rounds[0].opportunities.slice(1).map(o => o.turnId), [null, null]);
+    assert.equal(ctx.state().deliveries[0].state, 'accepted');
+    await ctx.clock.advance(1000);
+    assert.equal(ctx.calls.length, 2);
+  } finally { await ctx.close(); }
+});
+
+for (const order of ['round-first', 'dm-first'] as const) {
+  test(`simultaneous ${order} completions record the round result before the turn-limit pause`, async () => {
+    const ctx = setup({ maxTurns: 2 });
+    try {
+      await ctx.start();
+      ctx.send('Concurrent DM work.', ctx.agents[2].id);
+      await ctx.clock.advance(75);
+      await ctx.calls[0].runtime.tool('send_group_message', { body: 'A completed round contribution.' });
+      for (const index of order === 'round-first' ? [0, 1] : [1, 0]) ctx.calls[index].runtime.finish();
+      await flush();
+      assert.equal(ctx.state().session.reason, 'Turn limit reached');
+      assert.equal(ctx.state().rounds[0].status, 'interrupted');
+      assert.deepEqual(ctx.state().rounds[0].opportunities.map(o => o.status), ['spoke', 'skipped', 'skipped']);
+      assert.equal(ctx.state().rounds[0].opportunities[0].turnId, ctx.calls[0].turnId);
+      assert.equal(ctx.state().deliveries[0].state, 'accepted');
+      assert.ok(ctx.calls.every(c => ctx.state().activities.some(a => a.kind === 'system' && a.turnId === c.turnId && a.status === 'completed')));
+    } finally { await ctx.close(); }
+  });
+}
+
 test('turn and token limits pause the entire session including DM-triggered work', async () => {
   const turnLimited = setup({ maxTurns: 2 });
   try {
@@ -669,5 +773,6 @@ test('a one-turn budget allows its admitted turn to finish when usage is reporte
     assert.match(ctx.state().session.reason!, /Turn limit/);
     assert.equal(ctx.calls.length, 1);
     assert.equal(ctx.state().rounds[0].opportunities[0].status, 'spoke');
+    assert.deepEqual(ctx.state().rounds[0].opportunities.slice(1).map(o => o.status), ['skipped', 'skipped']);
   } finally { await ctx.close(); }
 });
