@@ -7,7 +7,7 @@ import { webFetch } from './web-fetch.js';
 
 export interface SchedulerClock { now(): number; setTimeout(fn: () => void, ms: number): any; clearTimeout(timer: any): void }
 const clockDefault: SchedulerClock = { now: Date.now, setTimeout, clearTimeout };
-type Active = { runtime: AgentRuntime; turnId: string; deadline: any; settled: Promise<RuntimeTurnResult>; sessionId: string; deliveryIds: string[]; inputCursor: number; acceptsSteering: boolean };
+type Active = { runtime: AgentRuntime; turnId: string; deadline: any; settled: Promise<RuntimeTurnResult>; sessionId: string; deliveryIds: string[]; inputCursor: number; acceptsSteering: boolean; acknowledgedDeliveryIds: Set<string>; outcome?: RuntimeTurnResult['status'] };
 const messageArgs = z.object({ body: z.string().trim().min(1).max(20000), reply_to: z.string().optional() });
 
 export class Scheduler {
@@ -44,8 +44,16 @@ export class Scheduler {
     const active = this.active.get(agentId);
     if (!active) return;
     active.acceptsSteering = false;
+    this.recordAcknowledgedDeliveries(active, [...active.acknowledgedDeliveryIds]);
     this.cancel(`dm:${agentId}`);
     await active.runtime.interrupt();
+  }
+  private recordAcknowledgedDeliveries(active: Active, ids: string[]) {
+    if (!ids.length) return;
+    for (const id of ids) active.acknowledgedDeliveryIds.add(id);
+    // A receipt confirms submission, but interruption leaves processing unknown.
+    const state = active.acceptsSteering || active.outcome === 'completed' ? 'accepted' : 'uncertain';
+    this.store.markDeliveries(ids, state, active.turnId);
   }
   private guard(session: Session, admittingTurn = true): string | null {
     if (admittingTurn && session.turnCount >= session.settings.maxTurns) return 'Turn limit reached';
@@ -144,7 +152,7 @@ export class Scheduler {
           const active = this.active.get(agent.id);
           if (active) {
             active.turnId = turnId;
-            this.store.markDeliveries(active.deliveryIds, 'accepted', turnId);
+            this.recordAcknowledgedDeliveries(active, active.deliveryIds);
             const current = this.store.getParticipant(agent.sessionId, agent.id);
             this.store.updateParticipant(agent.sessionId, agent.id, { groupCursor: Math.max(current.groupCursor, active.inputCursor) });
             const round = this.store.snapshot(agent.sessionId).rounds.find(r => r.status === 'running' && r.opportunities.some(o => o.agentId === agent.id && o.status === 'running'));
@@ -204,7 +212,7 @@ export class Scheduler {
     this.store.updateParticipant(sessionId, agentId, { status: 'thinking' });
     let settle!: (result: RuntimeTurnResult) => void;
     const settled = new Promise<RuntimeTurnResult>(resolve => { settle = resolve; });
-    const active: Active = { runtime, turnId: '', deadline: null, settled, sessionId, deliveryIds: input.deliveryIds, inputCursor: input.cursor, acceptsSteering: true };
+    const active: Active = { runtime, turnId: '', deadline: null, settled, sessionId, deliveryIds: input.deliveryIds, inputCursor: input.cursor, acceptsSteering: true, acknowledgedDeliveryIds: new Set() };
     this.active.set(agentId, active);
     const deliveryMarker = `input-${randomUUID()}`;
     // Uncertain until the runtime accepts a turn; never silently replay after a crash.
@@ -218,13 +226,16 @@ export class Scheduler {
     let result: RuntimeTurnResult;
     try {
       result = await runtime.run({ text: input.text, messageId: deliveryMarker });
-      if (result.inputState === 'not-submitted') this.store.markDeliveries(input.deliveryIds, 'pending');
-      if (result.turnId) {
-        this.store.markDeliveries(input.deliveryIds, 'accepted', result.turnId);
-        this.store.updateParticipant(sessionId, agentId, { groupCursor: Math.max(this.store.getParticipant(sessionId, agentId).groupCursor, input.cursor) });
-      }
     } catch (error) { result = { turnId: active.turnId, status: 'failed', error: String(error) }; }
     finally { this.clock.clearTimeout(active.deadline); active.acceptsSteering = false; }
+    active.outcome = result.status; // Captured by late steering receipts even after this slot is released.
+    if (result.inputState === 'not-submitted') this.store.markDeliveries(input.deliveryIds, 'pending');
+    if (result.turnId) {
+      active.turnId = result.turnId;
+      for (const id of input.deliveryIds) active.acknowledgedDeliveryIds.add(id);
+      this.store.updateParticipant(sessionId, agentId, { groupCursor: Math.max(this.store.getParticipant(sessionId, agentId).groupCursor, input.cursor) });
+    }
+    this.recordAcknowledgedDeliveries(active, [...active.acknowledgedDeliveryIds]);
     this.system(agent, result.turnId || deliveryMarker, result.error || (result.status === 'completed' ? 'Turn completed' : `Turn ${result.status}`), result.status);
     // Reserve the slot until an interrupted runtime is fully closed and removed.
     if (result.status !== 'completed') { await runtime.close(); this.runtimes.delete(agentId); }
@@ -253,7 +264,8 @@ export class Scheduler {
         const input = this.input(this.store.snapshot(sessionId), this.store.getParticipant(sessionId, agentId), 'dm');
         this.store.markDeliveries(input.deliveryIds, 'uncertain', active.turnId);
         const accepted = await active.runtime.steer({ text: input.text, messageId: `input-${randomUUID()}` });
-        this.store.markDeliveries(input.deliveryIds, accepted ? 'accepted' : 'pending', accepted ? active.turnId : undefined);
+        if (accepted) this.recordAcknowledgedDeliveries(active, input.deliveryIds);
+        else this.store.markDeliveries(input.deliveryIds, 'pending');
         if (accepted) this.store.updateParticipant(sessionId, agentId, { groupCursor: Math.max(this.store.getParticipant(sessionId, agentId).groupCursor, input.cursor) });
       } else {
         // runAgent synchronously reserves the active slot before its first await.

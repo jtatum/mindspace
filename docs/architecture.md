@@ -56,7 +56,9 @@ DM delivery does not automatically count as a scheduled group opportunity. If an
 
 ### DMs and steering
 
-Persist a DM before notifying its recipient. If the recipient is idle, start a turn. If it is running, submit the message through the active-turn steering path. Batch nearby deliveries with bounded latency to avoid a flood of tiny updates. If the active turn finishes during delivery, reconcile the receipt and queue the message for the next turn rather than dropping it.
+Persist a DM before notifying its recipient. If the recipient is idle, start a turn. If it is running, submit the message through the active-turn steering path. Batch nearby deliveries with bounded latency to avoid a flood of tiny updates. If the active turn finishes during delivery, reconcile the receipt against that turn's outcome.
+
+Only an explicit submission rejection returns a DM to the pending mailbox. A successful receipt confirms runtime acceptance, not processing: if its turn is interrupted or fails, mark the delivery uncertain and surface it for human review. Late receipts are reconciled against their original turn's outcome. A normal completion preserves acknowledged inputs as accepted, while unknown RPC outcomes remain uncertain. Resume does not automatically replay uncertain submissions because the agent may already have acted on them.
 
 Preserve original sender identity, recipient, message ID, and causal link when building model input. Agent-authored messages remain peer messages even when the transport represents input as user text; they do not become human instructions. Explicit human steering takes scheduling priority, while pending peer messages remain queued fairly.
 

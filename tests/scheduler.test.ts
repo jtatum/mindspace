@@ -51,6 +51,7 @@ class ControlledRuntime implements AgentRuntime {
   interrupts = 0;
   closed = false;
   acceptsSteering = true;
+  steerBarrier?: Promise<boolean>;
   interruptCompletesTurn = true;
   closeBarrier?: Promise<void>;
   constructor(readonly agent: Participant, readonly hooks: RuntimeHooks, private calls: Invocation[]) {
@@ -67,7 +68,7 @@ class ControlledRuntime implements AgentRuntime {
   async steer(input: RuntimeInput) {
     assert.ok(this.current, 'steering requires a running turn');
     this.steers.push(JSON.parse(input.text));
-    return this.acceptsSteering;
+    return this.steerBarrier ?? this.acceptsSteering;
   }
   finish(status: RuntimeTurnResult['status'] = 'completed', error?: string) {
     assert.ok(this.current, 'the fake runtime must have a turn to finish');
@@ -332,6 +333,119 @@ for (const scope of ['session', 'agent', 'deadline'] as const) {
     });
   }
 }
+
+for (const scope of ['session', 'agent', 'deadline'] as const) {
+  for (const responseTiming of ['before-completion', 'after-completion'] as const) {
+    test(`${scope} interruption leaves steering acknowledged ${responseTiming} uncertain and unreplayed`, async () => {
+      const ctx = setup({ turnTimeoutMs: 500 });
+      let acknowledge!: (accepted: boolean) => void;
+      let releaseClose!: () => void;
+      const closeBarrier = new Promise<void>(resolve => { releaseClose = resolve; });
+      try {
+        await ctx.start();
+        const first = ctx.calls[0];
+        first.runtime.interruptCompletesTurn = false;
+        first.runtime.closeBarrier = closeBarrier;
+        first.runtime.steerBarrier = new Promise<boolean>(resolve => { acknowledge = resolve; });
+        const message = ctx.send('This submission may already have affected the agent.', first.agentId);
+        await ctx.clock.advance(75);
+        assert.equal(first.runtime.steers.length, 1);
+        if (scope === 'deadline') await ctx.clock.advance(425);
+        else await ctx.scheduler.control(ctx.sessionId, scope === 'session' ? 'pause' : 'pause-agent', scope === 'agent' ? first.agentId : undefined);
+        if (responseTiming === 'before-completion') {
+          acknowledge(true); await flush();
+          assert.equal(ctx.state().deliveries[0].state, 'uncertain', 'interrupt acknowledgment cannot prove that the agent processed this input');
+        }
+        await ctx.finish(0, 'interrupted'); releaseClose(); await flush();
+        if (responseTiming === 'after-completion') { acknowledge(true); await flush(); }
+        assert.equal(ctx.state().deliveries[0].state, 'uncertain', 'a late success must not conceal an interrupted outcome');
+        assert.equal(ctx.state().deliveries[0].turnId, first.turnId);
+        await ctx.scheduler.control(ctx.sessionId, scope === 'session' ? 'resume' : 'resume-agent', scope === 'session' ? undefined : first.agentId);
+        await ctx.clock.advance(100);
+        assert.equal(ctx.store.pendingDeliveries(ctx.sessionId, first.agentId).length, 0);
+        assert.equal(ctx.calls.filter(call => call.input.directMessages.some(input => input.id === message.id)).length, 0, 'Resume must not repeat a submission whose effects are unknown');
+      } finally { acknowledge?.(true); releaseClose(); await flush(); await ctx.close(); }
+    });
+  }
+}
+
+for (const outcome of ['interrupted', 'failed', 'completed'] as const) {
+  test(`${outcome} outcome reconciles acknowledged initial and steering inputs after a pause request`, async () => {
+    const ctx = setup();
+    try {
+      await ctx.start();
+      const agentId = ctx.agents[1].id;
+      ctx.send('Start reviewing this.', agentId);
+      await ctx.clock.advance(75);
+      const direct = ctx.calls[1];
+      ctx.send('Also consider this.', agentId);
+      await ctx.clock.advance(75);
+      assert.deepEqual(ctx.state().deliveries.map(delivery => delivery.state), ['accepted', 'accepted']);
+      direct.runtime.interruptCompletesTurn = false;
+      await ctx.scheduler.control(ctx.sessionId, 'pause-agent', agentId);
+      direct.runtime.hooks.onTurnStarted(direct.turnId);
+      assert.deepEqual(ctx.state().deliveries.map(delivery => delivery.state), ['uncertain', 'uncertain']);
+      await ctx.finish(1, outcome);
+      const expected = outcome === 'completed' ? 'accepted' : 'uncertain';
+      assert.deepEqual(ctx.state().deliveries.map(delivery => delivery.state), [expected, expected]);
+    } finally { await ctx.close(); }
+  });
+}
+
+test('steering acknowledged after normal completion remains accepted', async () => {
+  const ctx = setup();
+  let acknowledge!: (accepted: boolean) => void;
+  try {
+    await ctx.start();
+    const first = ctx.calls[0];
+    first.runtime.steerBarrier = new Promise<boolean>(resolve => { acknowledge = resolve; });
+    ctx.send('An input to the successfully completed turn.', first.agentId);
+    await ctx.clock.advance(75);
+    await ctx.finish(0);
+    acknowledge(true); await flush();
+    assert.equal(ctx.state().deliveries[0].state, 'accepted');
+    assert.equal(ctx.state().deliveries[0].turnId, first.turnId);
+  } finally { acknowledge?.(true); await flush(); await ctx.close(); }
+});
+
+test('steering explicitly rejected after interruption is retried once on a fresh turn', async () => {
+  const ctx = setup();
+  let rejectInput!: (accepted: boolean) => void;
+  try {
+    await ctx.start();
+    const first = ctx.calls[0];
+    first.runtime.steerBarrier = new Promise<boolean>(resolve => { rejectInput = resolve; });
+    const message = ctx.send('The old runtime will reject this input.', first.agentId);
+    await ctx.clock.advance(75);
+    await ctx.scheduler.control(ctx.sessionId, 'pause'); await flush();
+    rejectInput(false); await flush();
+    assert.equal(ctx.state().deliveries[0].state, 'pending');
+    await ctx.scheduler.control(ctx.sessionId, 'resume');
+    await ctx.clock.advance(100);
+    const fresh = ctx.calls.filter(call => call.input.directMessages.some(input => input.id === message.id));
+    assert.equal(fresh.length, 1);
+    assert.notEqual(fresh[0].turnId, first.turnId);
+    assert.equal(ctx.state().deliveries[0].state, 'accepted');
+    assert.equal(ctx.state().deliveries[0].turnId, fresh[0].turnId);
+  } finally { rejectInput?.(false); await flush(); await ctx.close(); }
+});
+
+test('normal completion cannot confirm a steering input whose RPC outcome is unknown', async () => {
+  const ctx = setup();
+  let failReceipt!: (error: Error) => void;
+  try {
+    await ctx.start();
+    const first = ctx.calls[0];
+    first.runtime.steerBarrier = new Promise<boolean>((_resolve, reject) => { failReceipt = reject; });
+    ctx.send('An input without a known receipt.', first.agentId);
+    await ctx.clock.advance(75);
+    await ctx.finish(0);
+    failReceipt(new Error('Transport closed before the receipt')); await flush();
+    assert.equal(ctx.state().deliveries[0].state, 'uncertain');
+    assert.equal(ctx.store.pendingDeliveries(ctx.sessionId, first.agentId).length, 0);
+    assert.equal(ctx.state().session.status, 'paused');
+  } finally { failReceipt?.(new Error('Test ended')); await flush(); await ctx.close(); }
+});
 
 test('failed turns pause the session and record a failed opportunity rather than a pass or perpetual running slot', async () => {
   const ctx = setup();
