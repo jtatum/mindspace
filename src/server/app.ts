@@ -111,6 +111,7 @@ export async function buildApp({ store, scheduler, health, webRoot }: AppOptions
   app.post('/api/sessions/:id/control', async request => {
     const id = sessionId(request);
     store.getSession(id);
+    store.getParticipant(id, identities.get(request)!.id);
     const { action, agentId } = controlSchema.parse(request.body);
     if (agentId && store.getParticipant(id, agentId).kind !== 'agent') throw new StoreError('Agent controls require an agent participant');
     await scheduler.control(id, action, agentId);

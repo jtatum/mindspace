@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildApp } from '../src/server/app.js';
+import { buildApp, type ControlAction } from '../src/server/app.js';
 import { Store } from '../src/server/store.js';
 import type { CreateSessionInput, Identity, Message, RuntimeHealth, SessionEvent, Snapshot } from '../src/shared/types.js';
 
@@ -9,9 +9,10 @@ const health: RuntimeHealth = { mode: 'simulation', available: true, model: 'gpt
 async function setup() {
   const store = new Store(':memory:');
   const seen: Message[] = [];
+  const controls: Array<{ sessionId: string; action: ControlAction; agentId?: string }> = [];
   const app = await buildApp({ store, health, scheduler: {
     onMessage: message => { seen.push(message); },
-    control: (id, action) => { store.updateSession(id, { status: action === 'pause' ? 'paused' : 'running' }); },
+    control: (id, action, agentId) => { controls.push({ sessionId: id, action, agentId }); store.updateSession(id, { status: action === 'pause' ? 'paused' : 'running' }); },
     shutdown: () => {},
   } });
   const identityResponse = await app.inject({ method: 'POST', url: '/api/identities', payload: { name: 'Human' } });
@@ -19,7 +20,7 @@ async function setup() {
   const headers = { authorization: `Bearer ${identity.token}` };
   const response = await app.inject({ method: 'POST', url: '/api/sessions', headers, payload: input });
   assert.equal(response.statusCode, 201, response.body);
-  return { store, app, identity, headers, seen, identityResponse, snapshot: response.json<Snapshot>(), close: async () => { await app.close(); store.close(); } };
+  return { store, app, identity, headers, seen, controls, identityResponse, snapshot: response.json<Snapshot>(), close: async () => { await app.close(); store.close(); } };
 }
 
 test('HTTP identities authorize commands; unjoined humans can observe but must join to send', async () => {
@@ -45,6 +46,43 @@ test('HTTP identities authorize commands; unjoined humans can observe but must j
     assert.equal((await app.inject({ url: `${base}/export`, headers })).json<Snapshot>().messages.length, 2);
   } finally { await ctx.close(); }
 });
+
+for (const authentication of ['bearer', 'cookie'] as const) {
+  test(`${authentication} observers must join the target session before any control reaches the scheduler`, async () => {
+    const ctx = await setup();
+    try {
+      const identityResponse = await ctx.app.inject({ method: 'POST', url: '/api/identities', payload: { name: 'Observer' } });
+      const observer = identityResponse.json<Identity>();
+      const headers = authentication === 'bearer'
+        ? { authorization: `Bearer ${observer.token}` }
+        : { cookie: String(identityResponse.headers['set-cookie']).split(';')[0] };
+      ctx.store.createSession(input, observer, 'simulation'); // Membership elsewhere grants no controls here.
+      const sessionId = ctx.snapshot.session.id;
+      const base = `/api/sessions/${sessionId}`;
+      const agentId = ctx.snapshot.participants.find(participant => participant.kind === 'agent')!.id;
+      const actions: Array<{ action: ControlAction; agentId?: string }> = [
+        { action: 'start' }, { action: 'pause' }, { action: 'resume' }, { action: 'next-round' },
+        { action: 'pause-agent', agentId }, { action: 'resume-agent', agentId },
+      ];
+      const before = ctx.store.snapshot(sessionId);
+      assert.equal((await ctx.app.inject({ url: base, headers })).statusCode, 200, 'unjoined observation remains available');
+      for (const payload of actions) {
+        const response = await ctx.app.inject({ method: 'POST', url: `${base}/control`, headers, payload });
+        assert.equal(response.statusCode, 403, `${payload.action} must require membership in the target session`);
+      }
+      assert.deepEqual(ctx.controls, [], 'rejected controls must never invoke the scheduler');
+      assert.deepEqual(ctx.store.snapshot(sessionId), before, 'rejected controls must not change state, events, or membership');
+
+      assert.equal((await ctx.app.inject({ method: 'POST', url: `${base}/join`, headers })).statusCode, 200);
+      assert.equal(ctx.store.getParticipant(sessionId, observer.id).kind, 'human');
+      for (const payload of actions) {
+        const response = await ctx.app.inject({ method: 'POST', url: `${base}/control`, headers, payload });
+        assert.equal(response.statusCode, 200, `a joined human may invoke ${payload.action}`);
+      }
+      assert.deepEqual(ctx.controls, actions.map(({ action, agentId }) => ({ sessionId, action, agentId })));
+    } finally { await ctx.close(); }
+  });
+}
 
 test('API validates browser origins, payloads, agent controls and DM ownership', async () => {
   const ctx = await setup();

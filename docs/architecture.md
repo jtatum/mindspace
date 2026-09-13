@@ -113,7 +113,7 @@ An agent inspector shows status, current work, streamed progress, expandable too
 
 The round bar shows the round number, order, completed opportunities, passes, failures, countdown, and controls. Distinguish idle, queued, thinking, using a tool, paused, and failed states. Show model and reasoning effort from the start, even before they are editable.
 
-All humans in the session share conversation and inspection visibility. For local development, use a browser identity with a display name and stable ID and bind to loopback. Test multiple humans using separate browser profiles. Authentication and shared-cluster access belong to the deployment milestone.
+All humans in the session share conversation and inspection visibility. Authenticated observers may read sessions without joining, but sending messages or invoking session and agent controls requires membership in that session. The browser joins a session before displaying its controls. For local development, use a browser identity with a display name and stable ID and bind to loopback. Test multiple humans using separate browser profiles. Authentication and shared-cluster access belong to the deployment milestone.
 
 ## Integration evidence and remaining checks
 
