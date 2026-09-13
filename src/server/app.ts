@@ -44,7 +44,9 @@ function setIdentityCookie(request: FastifyRequest, reply: FastifyReply, token: 
 }
 
 export async function buildApp({ store, scheduler, health, webRoot }: AppOptions) {
-  const app = Fastify({ logger: false, bodyLimit: 128 * 1024 });
+  // Maximum session fields hold 120,560 Unicode code points. Escaped surrogate
+  // pairs need up to 12 JSON bytes each; 2 MiB also leaves room for JSON metadata.
+  const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
   const identities = new WeakMap<FastifyRequest, { id: string; name: string }>();
   const streams = new Set<FastifyReply['raw']>();
   const getHealth = async () => typeof health === 'function' ? await health() : health;

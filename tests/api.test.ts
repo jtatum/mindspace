@@ -136,6 +136,97 @@ test('API validates browser origins, payloads, agent controls and DM ownership',
   } finally { await ctx.close(); }
 });
 
+function encodePayload(payload: unknown, encoding: 'utf8' | 'escaped') {
+  const json = JSON.stringify(payload);
+  return encoding === 'utf8' ? json : json.replace(/[\u0080-\uffff]/g, unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+for (const encoding of ['utf8', 'escaped'] as const) {
+  test(`maximum-length Unicode messages survive ${encoding} JSON encoding`, async () => {
+    const ctx = await setup();
+    try {
+      const body = '🦊'.repeat(40000);
+      const requestId = '🦊'.repeat(200);
+      const payload = encodePayload({ body, requestId }, encoding);
+      assert.ok(Buffer.byteLength(payload) > 128 * 1024, 'exercise the former transport cap');
+      const response = await ctx.app.inject({ method: 'POST', url: `/api/sessions/${ctx.snapshot.session.id}/messages`, headers: { ...ctx.headers, 'content-type': 'application/json' }, payload });
+      assert.equal(response.statusCode, 201, response.body);
+      assert.equal(response.json<Message>().body, body);
+      assert.equal(ctx.store.snapshot(ctx.snapshot.session.id).messages.at(-1)!.body, body);
+      assert.equal(ctx.seen.length, 1);
+    } finally { await ctx.close(); }
+  });
+
+  test(`maximum-length five-agent sessions survive ${encoding} JSON encoding`, async () => {
+    const ctx = await setup();
+    try {
+      const input: CreateSessionInput = {
+        title: '🦊'.repeat(160), task: '🦊'.repeat(40000),
+        agents: Array.from({ length: 5 }, (_, index) => ({ name: `${index}${'🦊'.repeat(79)}`, instructions: '🦊'.repeat(16000), webFetch: true })),
+        settings: { roundDelayMs: 3600000, turnTimeoutMs: 1800000, maxRounds: 10000, maxTurns: 100000, maxTokens: 100000000, maxDurationMs: 604800000 },
+      };
+      const payload = encodePayload(input, encoding);
+      assert.ok(Buffer.byteLength(payload) > (encoding === 'escaped' ? 1024 : 128) * 1024);
+      const response = await ctx.app.inject({ method: 'POST', url: '/api/sessions', headers: { ...ctx.headers, 'content-type': 'application/json' }, payload });
+      assert.equal(response.statusCode, 201, response.body);
+      const snapshot = ctx.store.snapshot(response.json<Snapshot>().session.id);
+      assert.equal(snapshot.session.title, input.title);
+      assert.equal(snapshot.session.task, input.task);
+      assert.equal(snapshot.messages[0].body, input.task);
+      assert.deepEqual(snapshot.participants.filter(p => p.kind === 'agent').map(({ name, instructions, webFetch }) => ({ name, instructions, webFetch })), input.agents);
+    } finally { await ctx.close(); }
+  });
+}
+
+test('Unicode display names use the same character limit in validation and storage', async () => {
+  const ctx = await setup();
+  try {
+    const name = '🦊'.repeat(80);
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/identities', payload: { name } });
+    assert.equal(response.statusCode, 201, response.body);
+    assert.equal(ctx.store.authenticate(response.json<Identity>().token)!.name, name);
+    assert.equal((await ctx.app.inject({ method: 'POST', url: '/api/identities', payload: { name: `${name}🦊` } })).statusCode, 400);
+  } finally { await ctx.close(); }
+});
+
+test('field limits still reject oversized text below the transport cap without mutation', async () => {
+  const ctx = await setup();
+  try {
+    const before = ctx.store.snapshot(ctx.snapshot.session.id);
+    const sessions = ctx.store.listSessions();
+    for (const character of ['a', '🦊']) {
+      for (const payload of [{ body: character.repeat(40001), requestId: 'over-body' }, { body: 'Hello', requestId: character.repeat(201) }]) {
+        const response = await ctx.app.inject({ method: 'POST', url: `/api/sessions/${ctx.snapshot.session.id}/messages`, headers: ctx.headers, payload });
+        assert.equal(response.statusCode, 400, response.body);
+      }
+      for (const payload of [
+        { ...input, task: character.repeat(40001) },
+        { ...input, title: character.repeat(161) },
+        { ...input, agents: input.agents.map(agent => ({ ...agent, instructions: character.repeat(16001) })) },
+        { ...input, agents: input.agents.map(agent => ({ ...agent, name: character.repeat(81) })) },
+      ]) {
+        const response = await ctx.app.inject({ method: 'POST', url: '/api/sessions', headers: ctx.headers, payload });
+        assert.equal(response.statusCode, 400, response.body);
+      }
+    }
+    assert.deepEqual(ctx.store.snapshot(ctx.snapshot.session.id), before);
+    assert.deepEqual(ctx.store.listSessions(), sessions);
+    assert.deepEqual(ctx.seen, []);
+  } finally { await ctx.close(); }
+});
+
+test('requests above the 2 MiB transport cap are rejected without mutation', async () => {
+  const ctx = await setup();
+  try {
+    const before = ctx.store.snapshot(ctx.snapshot.session.id);
+    const payload = JSON.stringify({ body: 'Hello', requestId: 'over-transport' }).padEnd(2 * 1024 * 1024 + 1, ' ');
+    const response = await ctx.app.inject({ method: 'POST', url: `/api/sessions/${ctx.snapshot.session.id}/messages`, headers: { ...ctx.headers, 'content-type': 'application/json' }, payload });
+    assert.equal(response.statusCode, 413, response.body);
+    assert.deepEqual(ctx.store.snapshot(ctx.snapshot.session.id), before);
+    assert.deepEqual(ctx.seen, []);
+  } finally { await ctx.close(); }
+});
+
 test('DNS-rebinding hosts cannot mint identities or read even public API routes', async () => {
   const ctx = await setup();
   try {

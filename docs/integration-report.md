@@ -12,7 +12,7 @@ A local protocol probe found that feature flags alone did not remove tools force
 
 ## Automated verification
 
-The final full automated suite passed **91/91 tests**, and the production build passed. It covers:
+The final full automated suite passed **98/98 tests**, and the production build passed. It covers:
 
 - Durable identities and token hashing, session reopen, transaction rollback, sender authorization, canonical DM pairs, idempotent messages, and DM delivery isolation. Recovery requires the exact completed turn lifecycle marker; a completed input or compaction item alone cannot falsely confirm an unfinished delivery.
 - Cookie/bearer authentication, input and origin checks, ordered SSE replay followed by live delivery, and cross-session event isolation. Fresh review added strict loopback Host validation before every API exemption so a hostile DNS name cannot mint an identity or read local data by supplying a matching Origin.
@@ -90,6 +90,8 @@ Browser credentials rejected with HTTP 401 now return the app to identity creati
 Further scheduled review confirmed two scheduling defects. The session now pauses immediately after its final allowed round, preserving completed opportunities while interrupting concurrent DM turns and keeping queued/new DMs pending. Explicit group-history reads now advance the agent's persisted cursor through the returned contiguous history, so later steering and turns do not repeat it. Empty pages and old-history reads cannot advance or rewind the cursor, and skipping ahead cannot silently consume unread messages. Five new regressions reproduce the original failures and cover these boundaries, including quiet/speaking final rounds and sequence gaps containing only DMs.
 
 Turn-limit enforcement now also runs at completion, so a final quiet round or DM-only turn cannot leave an exhausted session idle or waiting through cooldown. An active round scheduler owns the pause until it has saved completed outcomes; otherwise DM completion applies the limit. Unadmitted opportunities remain skipped. Eight added regressions cover quiet/speaking final rounds, idle/cooldown DMs, agent deadline pause, waiting on a busy agent, and both orders of simultaneous round/DM completion; the existing one-turn-budget test also verifies that a completed contribution is preserved.
+
+The request body cap is now 2 MiB, covering maximum session fields even when supplementary Unicode characters use escaped surrogate pairs in JSON. Storage validates display names, messages and request IDs by Unicode code points, matching the API schemas. Seven added API regressions cover maximum-length messages and five-agent sessions in UTF-8 and escaped JSON, identity boundaries, oversized fields returning HTTP 400, and above-cap requests returning HTTP 413 without mutation. The transport cap still bounds excessive whitespace and other encoding overhead.
 
 ## Limits and follow-on validation
 

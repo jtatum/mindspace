@@ -79,7 +79,8 @@ export class Store extends EventEmitter {
 
   createIdentity(name: string): Identity {
     name = name.trim();
-    if (!name || name.length > 80) throw new StoreError('Display name must be 1–80 characters');
+    // Match the API schemas' Unicode code-point limits, including supplementary characters.
+    if (!name || Array.from(name).length > 80) throw new StoreError('Display name must be 1–80 characters');
     const identity = { id: randomUUID(), name, token: randomBytes(32).toString('base64url') };
     this.db.prepare('INSERT INTO identities(id,name,token_hash) VALUES(?,?,?)').run(identity.id, identity.name, tokenHash(identity.token));
     return identity;
@@ -189,7 +190,7 @@ export class Store extends EventEmitter {
       this.getSession(sessionId);
       this.getParticipant(sessionId, senderId);
       const body = input.body.trim();
-      if (!body || body.length > 40000 || !input.requestId || input.requestId.length > 200) throw new StoreError('A message requires a body (up to 40,000 characters) and a request ID');
+      if (!body || Array.from(body).length > 40000 || !input.requestId || Array.from(input.requestId).length > 200) throw new StoreError('A message requires a body (up to 40,000 characters) and a request ID');
       let conversation: Conversation | undefined;
       if (input.conversationId) {
         conversation = decode<Conversation>(this.db.prepare('SELECT data FROM conversations WHERE id=? AND session_id=?').get(input.conversationId, sessionId));

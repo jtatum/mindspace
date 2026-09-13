@@ -25,7 +25,7 @@ npm start
 
 After a build, `npm start` serves the complete application at [port 3001](http://127.0.0.1:3001). Both server modes bind to loopback. Persistent application and agent state lives in the ignored `.mindspace/` directory. Recovered experiments stay paused until resumed.
 
-The automated suite has 91 passing tests, and the production build passed. Live checks verified independent contexts surviving process restart, concurrent tool calls, reasoning summaries, active steering and interruption. A five-agent browser experiment exercised group messages, agent DMs, two human identities and all-pass idle, then retained its paused state and chat/activity history after a backend restart. The [integration report](docs/integration-report.md) records this evidence and the remaining acceptance work.
+The automated suite has 98 passing tests, and the production build passed. Live checks verified independent contexts surviving process restart, concurrent tool calls, reasoning summaries, active steering and interruption. A five-agent browser experiment exercised group messages, agent DMs, two human identities and all-pass idle, then retained its paused state and chat/activity history after a backend restart. The [integration report](docs/integration-report.md) records this evidence and the remaining acceptance work.
 
 - [Architecture and behavior](docs/architecture.md)
 - [Implementation status and remaining work](docs/implementation-plan.md)
