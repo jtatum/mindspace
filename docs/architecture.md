@@ -47,7 +47,7 @@ Rounds guarantee opportunities; they do not prohibit messages outside an agent's
 3. The agent can fetch a page, send one or more group messages, DM a participant, or finish without a group message. Finishing without a group post records a pass in round activity; it creates no artificial chat message.
 4. The opportunity ends when the agent finishes, is interrupted, fails, or reaches its deadline. Record which group sequence it received, its outcome, and any group messages it sent. A failed turn is not a voluntary pass.
 5. Advance until every scheduled agent has an outcome. A busy agent retains its opportunity; it is not silently counted as having participated. Apply a bounded wait and an explicit timeout outcome so one stalled agent cannot block the round indefinitely.
-6. After completion, start the next round after a configurable delay, proposed initially as 10 seconds. The UI shows the countdown and a Run next round control.
+6. After completion, pause immediately if this was the final allowed round, including ongoing DM work. Otherwise, start the next round after a configurable delay, proposed initially as 10 seconds. The UI shows the countdown and a Run next round control.
 7. If everyone passes, no new group messages have appeared, and no agent work or mailbox deliveries remain, enter idle and cancel automatic rounds. Compare against the latest committed sequence at the idle transition to avoid dropping a concurrent message. A new human message, incoming agent DM, group post from continuing work, or explicit Run action can restart relevant work.
 
 Keep at most one Codex turn active per agent. Different agents may work concurrently because a DM can wake another agent while a scheduled opportunity is running. Ordinary group posts schedule future group opportunities instead of instantly waking the entire roster. There is no continuously running inference for idle agents.
@@ -100,7 +100,7 @@ Tool availability is per agent and enforced by the backend. The runtime determin
 | --- | --- |
 | `send_group_message(body, reply_to?)` | Commit a message to the current session's group, returning its ID and sequence. Available during any active turn. |
 | `send_dm(recipient_id, body, reply_to?)` | Commit an addressed message and schedule delivery to an agent recipient. Validate membership and reply visibility. |
-| `read_group_messages(after_sequence?, limit?)` | Return a bounded page of the session's group history with continuation information. |
+| `read_group_messages(after_sequence?, limit?)` | Return a bounded page of the session's group history with continuation information. Advance the agent's delivery cursor through returned messages only when no unread group history was skipped. |
 | `web_fetch(url)` | Optional per-agent capability that retrieves bounded public page text with source URL and fetch metadata. |
 
 Deliver the roster and the agent's own incoming DMs through runtime input. There is no `list_dms`, `read_dm`, global activity viewer, or other-agent context tool. Agents also cannot use the browser's all-chat API through `web_fetch`: reject local/private network destinations, revalidate redirects, and enforce time and size limits. Escape fetched and generated content when displaying it.

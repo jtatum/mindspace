@@ -194,8 +194,16 @@ export class Scheduler {
     if (name === 'read_group_messages') {
       const args = z.object({ after_sequence: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).parse(rawArgs);
       const snapshot = this.store.snapshot(agent.sessionId); const group = snapshot.conversations.find(c => c.kind === 'group')!;
-      const all = snapshot.messages.filter(m => m.conversationId === group.id && m.sequence > args.after_sequence);
+      const history = snapshot.messages.filter(m => m.conversationId === group.id);
+      const all = history.filter(m => m.sequence > args.after_sequence);
       const page = all.slice(0, args.limit);
+      const current = this.store.getParticipant(agent.sessionId, agent.id);
+      const lastSequence = page.at(-1)?.sequence;
+      // Only consume a contiguous prefix of group history; explicit reads may skip ahead.
+      const skippedUnread = history.some(m => m.sequence > current.groupCursor && m.sequence <= args.after_sequence);
+      if (lastSequence !== undefined && lastSequence > current.groupCursor && !skippedUnread) {
+        this.store.updateParticipant(agent.sessionId, agent.id, { groupCursor: lastSequence });
+      }
       return { messages: page.map(m => ({ ...m, senderName: snapshot.participants.find(p => p.id === m.senderId)?.name })), hasMore: all.length > page.length, nextSequence: page.at(-1)?.sequence ?? args.after_sequence };
     }
     if (name === 'web_fetch' && agent.webFetch) return webFetch(z.object({ url: z.string().url() }).parse(rawArgs).url);
@@ -323,6 +331,7 @@ export class Scheduler {
       if (cancelled()) return;
       round.status = 'completed'; round.completedAt = this.iso(); this.store.saveRound(round);
       snapshot = this.store.snapshot(sessionId);
+      if (round.number >= snapshot.session.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
       const pendingWork = snapshot.participants.some(p => p.kind === 'agent' && !p.pausedByHuman && (this.active.has(p.id) || this.store.pendingDeliveries(sessionId, p.id).length > 0));
       const allQuiet = round.opportunities.every(o => o.status === 'passed' || o.status === 'skipped');
       if (allQuiet && !pendingWork && this.groupSequence(snapshot) === round.startSequence) this.store.updateSession(sessionId, { status: 'idle', reason: 'Everyone passed. Waiting for a new message.', nextRoundAt: null });

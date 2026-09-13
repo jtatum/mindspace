@@ -45,6 +45,7 @@ interface AgentInput {
   directMessages: Array<{ id: string; body: string; senderId: string; senderKind: string }>;
 }
 interface Invocation { agentId: string; turnId: string; input: AgentInput; runtime: ControlledRuntime }
+interface GroupHistory { messages: Array<{ id: string; sequence: number }>; hasMore: boolean; nextSequence: number }
 class ControlledRuntime implements AgentRuntime {
   private current: { turnId: string; resolve: (result: RuntimeTurnResult) => void } | undefined;
   steers: AgentInput[] = [];
@@ -520,6 +521,113 @@ test('retrying an already handled group message after idle does not allocate ano
     assert.equal(ctx.state().session.status, 'idle');
     assert.equal(ctx.calls.length, 6);
     assert.equal(ctx.state().rounds.length, 2);
+  } finally { await ctx.close(); }
+});
+
+for (const speaks of [false, true]) {
+  test(`the final allowed ${speaks ? 'speaking' : 'quiet'} round pauses immediately and blocks new DM turns`, async () => {
+    const ctx = setup({ maxRounds: 1 });
+    try {
+      await ctx.start();
+      if (speaks) await ctx.calls[0].runtime.tool('send_group_message', { body: 'Final round contribution.' });
+      await ctx.finish(0); await ctx.finish(1); await ctx.finish(2);
+      assert.equal(ctx.state().session.status, 'paused');
+      assert.equal(ctx.state().session.reason, 'Round limit reached');
+      assert.equal(ctx.state().session.nextRoundAt, null);
+      assert.equal(ctx.state().rounds[0].status, 'completed');
+      assert.deepEqual(ctx.state().rounds[0].opportunities.map(o => o.status), [speaks ? 'spoke' : 'passed', 'passed', 'passed']);
+      ctx.send('This DM must wait beyond the round limit.', ctx.agents[0].id);
+      ctx.send('This group message must not restart a finished experiment.');
+      await ctx.clock.advance(1500);
+      await ctx.scheduler.control(ctx.sessionId, 'resume');
+      await ctx.scheduler.control(ctx.sessionId, 'next-round');
+      await ctx.clock.advance(1500);
+      assert.equal(ctx.calls.length, 3);
+      assert.equal(ctx.state().session.status, 'paused');
+      assert.equal(ctx.store.pendingDeliveries(ctx.sessionId, ctx.agents[0].id).length, 1);
+    } finally { await ctx.close(); }
+  });
+}
+
+test('finishing the final round interrupts concurrent DMs and leaves queued DMs pending', async () => {
+  const ctx = setup({ maxRounds: 1 });
+  try {
+    await ctx.start(); await ctx.finish(0);
+    const first = ctx.agents[0].id;
+    ctx.send('Concurrent DM work during the final round.', first);
+    await ctx.clock.advance(75);
+    const direct = ctx.calls[2];
+    assert.equal(direct.agentId, first);
+    assert.equal(direct.input.event, 'incoming_direct_messages');
+    await ctx.finish(1); // The last agent starts its round opportunity while the DM remains active.
+    const queued = ctx.send('Queued just before the round completes.', ctx.agents[1].id);
+    await ctx.finish(3);
+    assert.equal(ctx.state().session.reason, 'Round limit reached');
+    assert.ok(direct.runtime.interrupts > 0);
+    assert.ok(direct.runtime.closed);
+    assert.equal(ctx.state().rounds[0].status, 'completed');
+    assert.ok(ctx.state().participants.filter(p => p.kind === 'agent').every(p => p.status === 'paused'));
+    await ctx.clock.advance(1500);
+    assert.equal(ctx.calls.length, 4);
+    assert.equal(ctx.state().deliveries.find(d => d.messageId === queued.id)?.state, 'pending');
+    assert.equal(ctx.state().deliveries.find(d => d.agentId === first)?.state, 'uncertain');
+  } finally { await ctx.close(); }
+});
+
+test('paged group reads advance the cursor and are not repeated in steering or later turns', async () => {
+  const ctx = setup();
+  try {
+    for (let i = 0; i < 125; i++) ctx.send(`History ${i}`);
+    const history = ctx.state().messages;
+    await ctx.start();
+    const first = ctx.calls[0];
+    assert.equal(first.input.groupMessages.length, 100);
+    const initialCursor = ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor;
+    const page = await first.runtime.tool('read_group_messages', { after_sequence: initialCursor, limit: 10 }) as GroupHistory;
+    assert.deepEqual(page.messages.map(m => m.id), history.slice(100, 110).map(m => m.id));
+    assert.equal(page.hasMore, true);
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, page.nextSequence);
+    const tail = await first.runtime.tool('read_group_messages', { after_sequence: page.nextSequence, limit: 100 }) as GroupHistory;
+    assert.deepEqual(tail.messages.map(m => m.id), history.slice(110).map(m => m.id));
+    assert.equal(tail.hasMore, false);
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, tail.nextSequence);
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, ctx.agents[1].id).groupCursor, 0, 'one agent reading must not consume another agent’s history');
+
+    const fresh = ctx.send('Only this new group message should accompany the steer.');
+    ctx.send('Please incorporate the new message.', first.agentId);
+    await ctx.clock.advance(75);
+    assert.deepEqual(first.runtime.steers[0].groupMessages.map(m => m.id), [fresh.id]);
+    await first.runtime.tool('read_group_messages', { after_sequence: 0, limit: 10 });
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, fresh.sequence, 'rereading old history must not rewind a newer steering cursor');
+    await ctx.finish(0);
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, fresh.sequence, 'completion must preserve all delivered history');
+    ctx.send('Start a subsequent turn.', first.agentId);
+    await ctx.clock.advance(75);
+    assert.equal(ctx.calls[2].agentId, first.agentId);
+    assert.deepEqual(ctx.calls[2].input.groupMessages, []);
+  } finally { await ctx.close(); }
+});
+
+test('group reads preserve skipped unread history and ignore empty pages and DM-only sequence gaps', async () => {
+  const ctx = setup();
+  try {
+    await ctx.start();
+    const first = ctx.calls[0];
+    const initialCursor = ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor;
+    const unread = [ctx.send('Unread one'), ctx.send('Unread two'), ctx.send('Unread three')];
+    const skipped = await first.runtime.tool('read_group_messages', { after_sequence: unread[0].sequence, limit: 100 }) as GroupHistory;
+    assert.deepEqual(skipped.messages.map(m => m.id), unread.slice(1).map(m => m.id));
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, initialCursor, 'reading later messages must not silently consume a skipped unread message');
+    const page = await first.runtime.tool('read_group_messages', { after_sequence: initialCursor, limit: 100 }) as GroupHistory;
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, page.nextSequence);
+    const empty = await first.runtime.tool('read_group_messages', { after_sequence: Number.MAX_SAFE_INTEGER }) as GroupHistory;
+    assert.deepEqual(empty.messages, []);
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, page.nextSequence, 'an empty result must not consume an arbitrary requested sequence');
+    const dm = ctx.send('A separate conversation creates a sequence gap.', ctx.agents[1].id);
+    const afterGap = ctx.send('The next unread group message.');
+    const next = await first.runtime.tool('read_group_messages', { after_sequence: dm.sequence }) as GroupHistory;
+    assert.deepEqual(next.messages.map(m => m.id), [afterGap.id]);
+    assert.equal(ctx.store.getParticipant(ctx.sessionId, first.agentId).groupCursor, afterGap.sequence, 'a gap containing only DMs does not skip group history');
   } finally { await ctx.close(); }
 });
 
