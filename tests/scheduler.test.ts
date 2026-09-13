@@ -471,12 +471,38 @@ test('turn deadlines interrupt a stuck agent and preserve other agents round opp
     assert.ok(ctx.calls[0].runtime.interrupts > 0);
     assert.ok(ctx.calls[0].runtime.closed);
     assert.equal(ctx.state().participants.find(agent => agent.id === ctx.agents[0].id)?.status, 'paused');
+    const lifecycle = ctx.state().activities.find(activity => activity.kind === 'system' && activity.turnId === ctx.calls[0].turnId);
+    assert.equal(lifecycle?.status, 'interrupted');
+    assert.match(lifecycle?.text ?? '', /Turn deadline reached/, 'runtime cleanup must not erase why the agent was automatically paused');
     assert.equal(ctx.calls[1].agentId, ctx.agents[1].id);
     await ctx.finish(1); await ctx.finish(2);
     assert.deepEqual(ctx.state().rounds[0].opportunities.map(opportunity => opportunity.status), ['failed', 'passed', 'passed']);
     assert.equal(ctx.state().rounds[0].status, 'completed');
   } finally { await ctx.close(); }
 });
+
+for (const outcome of ['failed', 'completed'] as const) {
+  test(`deadline cause survives a late ${outcome} outcome and runtime cleanup`, async () => {
+    const ctx = setup({ turnTimeoutMs: 500 });
+    let releaseClose!: () => void;
+    const closeBarrier = new Promise<void>(resolve => { releaseClose = resolve; });
+    try {
+      await ctx.start();
+      const first = ctx.calls[0];
+      first.runtime.interruptCompletesTurn = false;
+      first.runtime.closeBarrier = closeBarrier;
+      await ctx.clock.advance(500);
+      await ctx.finish(0, outcome, outcome === 'failed' ? 'Harness connection lost during shutdown' : undefined);
+      releaseClose(); await flush();
+      const lifecycle = ctx.state().activities.filter(activity => activity.kind === 'system' && activity.turnId === first.turnId);
+      assert.equal(lifecycle.length, 1, 'the final lifecycle record retains the original cause');
+      assert.equal(lifecycle[0].status, outcome, 'retain the actual terminal outcome even when completion races interruption');
+      assert.match(lifecycle[0].text, /Turn deadline reached/);
+      assert.match(lifecycle[0].text, outcome === 'failed' ? /Harness connection lost during shutdown/ : /Turn completed/);
+      assert.equal(ctx.state().participants.find(agent => agent.id === first.agentId)?.status, 'paused');
+    } finally { releaseClose(); await ctx.close(); }
+  });
+}
 
 test('retrying an already handled group message after idle does not allocate another round', async () => {
   const ctx = setup();

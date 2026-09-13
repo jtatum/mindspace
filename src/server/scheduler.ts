@@ -217,7 +217,9 @@ export class Scheduler {
     const deliveryMarker = `input-${randomUUID()}`;
     // Uncertain until the runtime accepts a turn; never silently replay after a crash.
     this.store.markDeliveries(input.deliveryIds, 'uncertain', deliveryMarker);
+    let deadlineReached = false;
     active.deadline = this.clock.setTimeout(() => {
+      deadlineReached = true;
       void this.interruptAgent(agentId);
       this.store.updateParticipant(sessionId, agentId, { pausedByHuman: true, status: 'paused' });
       this.system(agent, active.turnId || deliveryMarker, 'Turn deadline reached', 'interrupted');
@@ -236,7 +238,8 @@ export class Scheduler {
       this.store.updateParticipant(sessionId, agentId, { groupCursor: Math.max(this.store.getParticipant(sessionId, agentId).groupCursor, input.cursor) });
     }
     this.recordAcknowledgedDeliveries(active, [...active.acknowledgedDeliveryIds]);
-    this.system(agent, result.turnId || deliveryMarker, result.error || (result.status === 'completed' ? 'Turn completed' : `Turn ${result.status}`), result.status);
+    const outcomeText = result.error || (result.status === 'completed' ? 'Turn completed' : `Turn ${result.status}`);
+    this.system(agent, result.turnId || deliveryMarker, deadlineReached ? `Turn deadline reached. ${outcomeText}` : outcomeText, result.status);
     // Reserve the slot until an interrupted runtime is fully closed and removed.
     if (result.status !== 'completed') { await runtime.close(); this.runtimes.delete(agentId); }
     this.active.delete(agentId);

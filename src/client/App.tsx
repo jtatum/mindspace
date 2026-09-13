@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowDownToLine, ArrowRight, ArrowUp, Bot, Check, ChevronDown, ChevronRight, Circle, Clock3, Code2, Compass, ExternalLink, Eye, Globe2, Hash, LoaderCircle, Menu, MessageCircle, MessagesSquare, MoreHorizontal, Pause, Play, Plus, Radio, Settings2, Sparkles, Square, Terminal, Users, Workflow, X } from 'lucide-react';
 import { DEFAULT_SETTINGS, type Activity, type Conversation, type CreateSessionInput, type Identity, type Message, type Participant, type RuntimeHealth, type Session, type Snapshot } from '../shared/types';
-import { api, downloadSession, readIdentity, saveIdentity } from './api';
+import { api, downloadSession, readIdentity, saveIdentity, withIdentityRecovery } from './api';
 import { subscribeSessionEvents } from './session-events';
 
 const agentColors = ['#d5e5a7', '#aecfcb', '#d9bd9f', '#c1b5df', '#a6c3db'];
@@ -44,6 +44,17 @@ export default function App() {
   const sessionRef = useRef<string | null>(null);
   const cursorRef = useRef(0);
   const hasRestoredSession = useRef(false);
+  const identityRef = useRef(identity);
+  const stopSessionEvents = useRef<(() => void) | null>(null);
+
+  const invalidateIdentity = useCallback(() => {
+    identityRef.current = null; sessionRef.current = null; cursorRef.current = 0; hasRestoredSession.current = false;
+    stopSessionEvents.current?.(); stopSessionEvents.current = null;
+    setIdentity(null); setSessions([]); setSnapshot(null); setSelection(initialSelection); setInspectedId(null);
+    setShowCreate(false); setShowSettings(false); setSidebarOpen(false); setLoading(false); setBusy(false); setConnected(false);
+    setError('Your saved browser identity is no longer valid. Enter your name to continue.');
+  }, []);
+  const request = useCallback(<T,>(path: string, requestIdentity: Identity | null, options: RequestInit = {}) => withIdentityRecovery(requestIdentity, () => identityRef.current, invalidateIdentity, () => api<T>(path, requestIdentity, options)), [invalidateIdentity]);
 
   const receiveSnapshot = useCallback((value: Snapshot) => {
     if (sessionRef.current !== value.session.id) return;
@@ -56,14 +67,14 @@ export default function App() {
     sessionRef.current = sessionId; cursorRef.current = 0;
     setLoading(true); setError(null); setSnapshot(null); setSelection(initialSelection); setInspectedId(null); setSidebarOpen(false);
     try {
-      await api(`/sessions/${sessionId}/join`, identity, { method: 'POST' });
-      const value = await api<Snapshot>(`/sessions/${sessionId}`, identity);
+      await request(`/sessions/${sessionId}/join`, identity, { method: 'POST' });
+      const value = await request<Snapshot>(`/sessions/${sessionId}`, identity);
       if (sessionRef.current !== sessionId) return;
       receiveSnapshot(value); setInspectedId(window.innerWidth > 930 ? value.participants.find(p => p.kind === 'agent')?.id ?? null : null);
       localStorage.setItem('mindspace.session', sessionId);
-    } catch (failure) { if (sessionRef.current === sessionId) setError(errorText(failure)); }
-    finally { if (sessionRef.current === sessionId) setLoading(false); }
-  }, [identity, receiveSnapshot]);
+    } catch (failure) { if (sessionRef.current === sessionId && identityRef.current?.token === identity.token) setError(errorText(failure)); }
+    finally { if (sessionRef.current === sessionId && identityRef.current?.token === identity.token) setLoading(false); }
+  }, [identity, receiveSnapshot, request]);
 
   useEffect(() => {
     let active = true;
@@ -74,32 +85,35 @@ export default function App() {
   useEffect(() => {
     if (!identity) return;
     let active = true;
-    void api<Session[]>('/sessions', identity).then(values => {
-      if (!active) return; setSessions(values);
+    void request<Session[]>('/sessions', identity).then(values => {
+      if (!active || identityRef.current?.token !== identity.token) return; setSessions(values);
       if (!hasRestoredSession.current) {
         hasRestoredSession.current = true;
         const saved = localStorage.getItem('mindspace.session');
         if (saved && values.some(s => s.id === saved)) void openSession(saved);
       }
-    }).catch(failure => { if (active) setError(errorText(failure)); });
+    }).catch(failure => { if (active && identityRef.current?.token === identity.token) setError(errorText(failure)); });
     return () => { active = false; };
-  }, [identity, openSession]);
+  }, [identity, openSession, request]);
   const sessionId = snapshot?.session.id;
   useEffect(() => {
     if (!sessionId || !identity) { setConnected(false); return; }
-    return subscribeSessionEvents({
+    const stop = subscribeSessionEvents({
       sessionId,
       getCursor: () => cursorRef.current,
-      fetchSnapshot: signal => api<Snapshot>(`/sessions/${sessionId}`, identity, { signal }),
+      fetchSnapshot: signal => request<Snapshot>(`/sessions/${sessionId}`, identity, { signal }),
       receiveSnapshot,
       setConnected,
-      isCurrent: () => sessionRef.current === sessionId,
+      isCurrent: () => sessionRef.current === sessionId && identityRef.current?.token === identity.token,
     });
-  }, [sessionId, identity, receiveSnapshot]);
+    stopSessionEvents.current = stop;
+    return () => { stop(); if (stopSessionEvents.current === stop) stopSessionEvents.current = null; };
+  }, [sessionId, identity, receiveSnapshot, request]);
 
   async function createSession(input: CreateSessionInput) {
     if (!identity) return;
-    const value = await api<Snapshot>('/sessions', identity, { method: 'POST', body: JSON.stringify(input) });
+    const value = await request<Snapshot>('/sessions', identity, { method: 'POST', body: JSON.stringify(input) });
+    if (identityRef.current?.token !== identity.token) return;
     sessionRef.current = value.session.id; cursorRef.current = value.eventSeq; receiveSnapshot(value);
     setSelection(initialSelection); setInspectedId(window.innerWidth > 930 ? value.participants.find(p => p.kind === 'agent')?.id ?? null : null); setShowCreate(false); setError(null);
     localStorage.setItem('mindspace.session', value.session.id);
@@ -107,16 +121,21 @@ export default function App() {
   async function control(action: Control, agentId?: string) {
     if (!snapshot || !identity) return;
     setBusy(true); setError(null);
-    try { receiveSnapshot(await api<Snapshot>(`/sessions/${snapshot.session.id}/control`, identity, { method: 'POST', body: JSON.stringify({ action, agentId }) })); }
-    catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
+    try { receiveSnapshot(await request<Snapshot>(`/sessions/${snapshot.session.id}/control`, identity, { method: 'POST', body: JSON.stringify({ action, agentId }) })); }
+    catch (failure) { if (identityRef.current?.token === identity.token) setError(errorText(failure)); } finally { if (identityRef.current?.token === identity.token) setBusy(false); }
   }
   async function send(body: string, target: { conversationId?: string; recipientId?: string }, requestId: string) {
     if (!snapshot || !identity) throw new Error('Join a session before sending a message.');
     const currentId = snapshot.session.id;
-    await api(`/sessions/${currentId}/messages`, identity, { method: 'POST', body: JSON.stringify({ body, ...target, requestId }) });
-    void api<Snapshot>(`/sessions/${currentId}`, identity).then(receiveSnapshot).catch(() => {
+    await request(`/sessions/${currentId}/messages`, identity, { method: 'POST', body: JSON.stringify({ body, ...target, requestId }) });
+    void request<Snapshot>(`/sessions/${currentId}`, identity).then(receiveSnapshot).catch(() => {
       // The stream subscription owns refresh recovery and connection status.
     });
+  }
+  async function exportSession() {
+    if (!snapshot || !identity) return;
+    try { await withIdentityRecovery(identity, () => identityRef.current, invalidateIdentity, () => downloadSession(snapshot.session.id, snapshot.session.title, identity)); }
+    catch (failure) { if (identityRef.current?.token === identity.token) setError(errorText(failure)); }
   }
   function selectConversation(value: ConversationSelection) { setSelection(value); setSidebarOpen(false); }
   const agents = snapshot?.participants.filter(p => p.kind === 'agent') ?? [];
@@ -160,7 +179,7 @@ export default function App() {
       </div>
     </aside>
     <div className="main-shell">
-      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><span className="breadcrumb-root">Workspace</span><ChevronRight size={13} /><strong>{snapshot?.session.title ?? 'Overview'}</strong></div><div className="topbar-actions"><span className={`connection ${connected ? 'live' : ''}`}><Radio size={13} />{snapshot ? connected ? 'Live session' : 'Reconnecting' : 'Local development'}</span>{snapshot && <><button className="icon-button" title="Session settings" aria-label="Session settings" onClick={() => setShowSettings(true)}><Settings2 size={17} /></button><button className="icon-button" title="Export experiment" aria-label="Export experiment" onClick={() => { if (identity) void downloadSession(snapshot.session.id, snapshot.session.title, identity).catch(failure => setError(errorText(failure))); }}><ArrowDownToLine size={17} /></button></>}</div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><span className="breadcrumb-root">Workspace</span><ChevronRight size={13} /><strong>{snapshot?.session.title ?? 'Overview'}</strong></div><div className="topbar-actions"><span className={`connection ${connected ? 'live' : ''}`}><Radio size={13} />{snapshot ? connected ? 'Live session' : 'Reconnecting' : 'Local development'}</span>{snapshot && <><button className="icon-button" title="Session settings" aria-label="Session settings" onClick={() => setShowSettings(true)}><Settings2 size={17} /></button><button className="icon-button" title="Export experiment" aria-label="Export experiment" onClick={() => void exportSession()}><ArrowDownToLine size={17} /></button></>}</div></header>
       {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError(null)}><X size={16} /></button></div>}
       {health?.mode === 'simulation' && <div className="simulation-banner"><Code2 size={15} /><strong>Simulation mode</strong><span>Scripted agents for testing. No model is running.</span></div>}
       {health && !health.available && <div className="runtime-banner"><Terminal size={16} /><span><strong>Runtime needs attention.</strong> {health.message ?? 'Codex is unavailable. You can create a session and chat while the runtime is configured.'}</span></div>}
@@ -178,7 +197,7 @@ export default function App() {
         </div>
       </> : <Welcome onCreate={() => setShowCreate(true)} disabled={!identity} />}
     </div>
-    {!identity && <IdentityDialog onSubmit={async name => { const value = await api<Identity>('/identities', null, { method: 'POST', body: JSON.stringify({ name }) }); saveIdentity(value); setIdentity(value); }} />}
+    {!identity && <IdentityDialog onSubmit={async name => { const value = await api<Identity>('/identities', null, { method: 'POST', body: JSON.stringify({ name }) }); saveIdentity(value); identityRef.current = value; setIdentity(value); setError(null); }} />}
     {showCreate && identity && <CreateDialog onClose={() => setShowCreate(false)} onSubmit={createSession} mode={health?.mode} />}
     {showSettings && snapshot && <SettingsDialog snapshot={snapshot} onClose={() => setShowSettings(false)} />}
   </div>;

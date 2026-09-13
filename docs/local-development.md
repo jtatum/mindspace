@@ -57,6 +57,8 @@ The data directory contains `mindspace.sqlite` and its SQLite sidecar files, plu
 
 On restart, saved experiments return paused, unfinished activity and rounds are marked interrupted, and ambiguous accepted deliveries become uncertain. The inspector reports messages with unconfirmed delivery. These uncertain messages are not automatically replayed: inspect the conversation and deliberately send a new message if the agent should receive the instruction again. A confirmed tool send remains in chat and is deduplicated by its request identity.
 
+If the database is reset or restored without your saved browser identity, the app asks for your display name again when the server rejects the old credential. Temporary connection and server failures keep your saved identity intact.
+
 Resume continues from the saved Codex thread and new pending messages. It does not rerun the entire experiment, resolve ambiguous consumption automatically, or guarantee identical model output. The JSON export contains application messages, conversations, activities, rounds, settings, and reported usage; it is an observation record rather than a portable full Codex checkpoint.
 
 ## Verification commands
