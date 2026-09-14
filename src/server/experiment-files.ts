@@ -50,9 +50,20 @@ export function readSharedFile(root: string, name: string, offset = 0) {
   const text = readFileSync(path, 'utf8');
   return { path: name, text: text.slice(offset, offset + 20000), nextOffset: Math.min(offset + 20000, text.length), hasMore: offset + 20000 < text.length, revision: revision(text) };
 }
+export function assertSharedWritePath(name: string) {
+  // Apply the same policy on case-sensitive and case-insensitive volumes.
+  const folded = name.toLowerCase();
+  if (['papers', 'papers.jsonl', 'papers.csv'].includes(folded) || folded.startsWith('papers/')) throw new Error('Imported papers are read-only; write reviews and notes separately');
+  if (folded === 'reviews') throw new Error('The reviews directory is reserved for review files');
+  const numberedReview = /^reviews\/(\d+)\.md$/i.exec(name);
+  if ((folded.startsWith('reviews/') && !name.startsWith('reviews/')) ||
+      (numberedReview && name !== `reviews/${String(Number(numberedReview[1])).padStart(4, '0')}.md`)) {
+    throw new Error('Use the canonical review path reviews/NNNN.md');
+  }
+}
 export function writeSharedFile(root: string, name: string, text: string, expectedRevision: string | null) {
   const path = safePath(root, name);
-  if (['papers.jsonl', 'papers.csv'].includes(name) || name.startsWith('papers/')) throw new Error('Imported papers are read-only; write reviews and notes separately');
+  assertSharedWritePath(name);
   if (Buffer.byteLength(text) > 200000) throw new Error('Write at most 200 KB per file');
   const current = existsSync(path) ? readSharedFile(root, name).revision : null;
   if (current !== expectedRevision) throw new Error('File changed or already exists. Read it and merge your changes before retrying.');

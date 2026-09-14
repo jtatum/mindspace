@@ -13,8 +13,16 @@ import { experimentDirectory } from '../src/server/experiment-files.js';
 import { extractPdf, MAX_HOSTED_PDF_BYTES } from '../src/server/pdf-extraction.js';
 import { downloadPapers } from '../scripts/download-papers.js';
 
-test('hosted manifest and PDF requests never follow redirects to another endpoint', async () => {
+test('hosted manifest and PDF requests never follow redirects to another endpoint', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'mindspace-redirect-'));
+  // A user curlrc must not silently re-enable redirect following.
+  writeFileSync(join(directory, '.curlrc'), 'location\n');
+  const previousCurlHome = process.env.CURL_HOME;
+  t.after(() => {
+    if (previousCurlHome === undefined) delete process.env.CURL_HOME;
+    else process.env.CURL_HOME = previousCurlHome;
+  });
+  process.env.CURL_HOME = directory;
   const hits: string[] = [];
   const server = createServer((req, res) => {
     hits.push(req.url!);

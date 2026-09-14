@@ -51,6 +51,10 @@ test('reviewer tool callbacks read paper text and save review files with durable
     assert.equal((await fox('read_papers', { assigned_to_self: true, status: 'pending' })).papers[0].number, 4);
     assert.equal((await horse('read_shared_file', { path: 'reviews/0001.md' })).text, review);
     await assert.rejects(horse('write_shared_file', { path: 'reviews/0001.md', text: 'Clobber', expected_revision: saved.revision }), /assigned reviewer/);
+    for (const path of ['Reviews/0001.md', 'reviews/0001.MD', 'REVIEWS/0001.MD']) {
+      await assert.rejects(horse('write_shared_file', { path, text: 'Clobber', expected_revision: saved.revision }), /canonical/);
+    }
+    assert.equal(readFileSync(join(root, 'reviews/0001.md'), 'utf8'), review);
     await assert.rejects(fox('write_shared_file', { path: 'reviews/0001.md', text: 'Stale', expected_revision: null }), /changed/);
     assert.equal(store.exportPapers(sessionId)[0].review, review, 'failed file write rolls back the queue change');
     await fox('write_shared_file', { path: 'reviews/0001.md', text: review + '\nUpdated evidence.', expected_revision: saved.revision });
@@ -114,7 +118,11 @@ test('shared files prevent lost updates, protect imported lists, and reject trav
     writeSharedFile(root, 'notes/fox.md', 'Second draft', created.revision);
     assert.throws(() => writeSharedFile(root, 'notes/fox.md', 'Stale draft', created.revision), /changed/);
     assert.equal(readSharedFile(root, 'notes/fox.md').text, 'Second draft');
-    assert.throws(() => writeSharedFile(root, 'papers.jsonl', 'overwrite', null), /read-only/);
+    for (const path of ['papers', 'PAPERS', 'papers.jsonl', 'PAPERS.JSONL', 'Papers.csv', 'Papers/0001.pdf']) {
+      assert.throws(() => writeSharedFile(root, path, 'overwrite', null), /read-only/);
+    }
+    for (const path of ['reviews', 'REVIEWS']) assert.throws(() => writeSharedFile(root, path, 'block directory', null), /reserved/);
+    mkdirSync(join(root, 'papers')); // Reserved-name writes must leave the cache directory available.
     assert.throws(() => writeSharedFile(root, '../outside', 'escape', null), /relative path/);
     symlinkSync(tmpdir(), join(root, 'escape'));
     assert.throws(() => writeSharedFile(root, 'escape/file', 'escape', null), /Symbolic/);

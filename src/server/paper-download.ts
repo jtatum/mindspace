@@ -26,6 +26,6 @@ export async function downloadPaperFile(urlString: string, destination: string, 
   const pinned = address.family === 6 ? `[${address.address}]` : address.address;
   // Do not follow redirects: the configured corpus endpoint is the only grant.
   // Pin DNS and bypass environment proxies so the checked address is used.
-  const { stdout } = await run('curl', ['--fail', '--silent', '--show-error', '--noproxy', '*', '--proto', '=http,https', '--resolve', `${url.hostname}:${port}:${pinned}`, '--max-time', String(options.timeoutMs / 1000), '--max-filesize', String(options.maxBytes), '--output', destination, '--write-out', '%{http_code}', url.href], { encoding: 'utf8', maxBuffer: 10000, timeout: options.timeoutMs + 5000 });
+  const { stdout } = await run('curl', ['--disable', '--fail', '--silent', '--show-error', '--noproxy', '*', '--proto', '=http,https', '--resolve', `${url.hostname}:${port}:${pinned}`, '--max-time', String(options.timeoutMs / 1000), '--max-filesize', String(options.maxBytes), '--output', destination, '--write-out', '%{http_code}', url.href], { encoding: 'utf8', maxBuffer: 10000, timeout: options.timeoutMs + 5000 });
   if (!/^2\d\d$/.test(stdout.trim())) throw new Error(`Paper server returned HTTP ${stdout.trim()}; redirects are not allowed. Configure a direct corpus URL.`);
 }

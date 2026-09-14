@@ -5,7 +5,7 @@ import type { AgentRuntime, RuntimeFactory, RuntimeTurnResult } from './runtime/
 import type { Store } from './store.js';
 import { webFetch } from './web-fetch.js';
 import { cachePaper } from './paper-cache.js';
-import { experimentDirectory, listSharedFiles, readSharedFile, writeSharedFile } from './experiment-files.js';
+import { assertSharedWritePath, experimentDirectory, listSharedFiles, readSharedFile, writeSharedFile } from './experiment-files.js';
 
 export interface SchedulerClock { now(): number; setTimeout(fn: () => void, ms: number): any; clearTimeout(timer: any): void }
 const clockDefault: SchedulerClock = { now: Date.now, setTimeout, clearTimeout };
@@ -225,6 +225,7 @@ export class Scheduler {
     }
     if (name === 'write_shared_file') {
       const args = z.object({ path: z.string().min(1).max(300), text: z.string().max(200000), expected_revision: z.string().nullable() }).parse(rawArgs);
+      assertSharedWritePath(args.path);
       const reviewFile = /^reviews\/(\d+)\.md$/.exec(args.path);
       if (reviewFile && agent.paperReview) {
         const number = Number(reviewFile[1]);
