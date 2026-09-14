@@ -7,6 +7,7 @@ import { DEFAULT_MODEL, DEFAULT_EFFORT } from '../../shared/types.js';
 import type { AgentRuntime, RuntimeHooks, RuntimeInput, RuntimeTurnResult } from './types.js';
 import { CodexRpc, CODEX_VERSION, type WireMessage } from './rpc.js';
 import { prepareRuntime } from './config.js';
+import { compactActivity } from '../activity-storage.js';
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });
 export function chatTools(web: boolean, papers = false) {
@@ -151,11 +152,11 @@ export class CodexRuntime implements AgentRuntime {
       if (item.type === 'userMessage') return; // Addressed messages already live in their chat channels.
       const kind: Activity['kind'] = item.type === 'reasoning' ? 'reasoning' : item.type === 'agentMessage' ? 'message' : /toolcall|commandExecution|webSearch/i.test(item.type) ? 'tool' : 'system';
       const key = `${this.agent.id}:${item.id}`; const prior = this.items.get(key); const now = new Date().toISOString();
-      const activity: Activity = { id: key, sessionId: this.agent.sessionId, agentId: this.agent.id, turnId: p.turnId || this.active?.turnId || '', kind,
+      const activity: Activity = compactActivity({ id: key, sessionId: this.agent.sessionId, agentId: this.agent.id, turnId: p.turnId || this.active?.turnId || '', kind,
         title: kind === 'reasoning' ? 'Reasoning summary' : kind === 'message' ? (item.phase === 'final_answer' ? 'Turn response' : 'Progress') : item.tool || item.type,
         text: kind === 'reasoning' ? (item.summary?.join('\n\n') || prior?.text || '') : item.text ?? prior?.text ?? '',
         status: method === 'item/started' ? 'inProgress' : item.status === 'failed' || item.success === false ? 'failed' : 'completed',
-        arguments: item.arguments, result: item.contentItems ?? item.result, createdAt: prior?.createdAt || now, updatedAt: now };
+        arguments: item.arguments, result: item.contentItems ?? item.result, createdAt: prior?.createdAt || now, updatedAt: now });
       this.items.set(key, activity); this.hooks.onActivity({ ...activity }); return;
     }
     if (method === 'item/agentMessage/delta' || method === 'item/reasoning/summaryTextDelta') {

@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { z } from 'zod';
@@ -173,7 +174,8 @@ export async function buildApp({ store, scheduler, health, webRoot, arxivExperim
     const id = sessionId(request);
     reply.header('Content-Disposition', `attachment; filename="mindspace-${id}.json"`);
     reply.header('Cache-Control', 'no-store');
-    return { ...store.snapshot(id), ...(store.paperProgress(id).total ? { papers: store.exportPapers(id) } : {}) };
+    store.getSession(id);
+    return reply.type('application/json').send(Readable.from(store.streamExport(id), { objectMode: false, highWaterMark: 16384 }));
   });
   app.get('/api/sessions/:id/events', async (request, reply) => {
     const id = sessionId(request);

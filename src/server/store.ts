@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { experimentDirectory, safePath, writeSharedFile } from './experiment-files.js';
 import { checkExperimentStorage, checkSharedWriteStorage } from './shared-storage.js';
+import { ACTIVITY_DATA_SQL, compactActivity } from './activity-storage.js';
 import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SETTINGS,
@@ -230,7 +231,7 @@ export class Store extends EventEmitter {
 
   snapshot(sessionId: string): Snapshot {
     const session = this.getSession(sessionId);
-    const records = <T>(table: string) => this.db.prepare(`SELECT data FROM ${table} WHERE session_id=? ORDER BY rowid`).all(sessionId).map(row => decode<T>(row)!);
+    const records = <T>(table: string) => this.db.prepare(`SELECT ${table === 'activities' ? ACTIVITY_DATA_SQL : 'data'} AS data FROM ${table} WHERE session_id=? ORDER BY rowid`).all(sessionId).map(row => decode<T>(row)!);
     const row = this.db.prepare('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events WHERE session_id=?').get(sessionId) as { sequence: number };
     return {
       session, participants: records<Participant>('participants'), conversations: records<Conversation>('conversations'),
@@ -287,6 +288,27 @@ export class Store extends EventEmitter {
   exportPapers(sessionId: string): Paper[] {
     this.getSession(sessionId);
     return this.db.prepare('SELECT data FROM papers WHERE session_id=? ORDER BY number').all(sessionId).map(row => decode<Paper>(row)!);
+  }
+
+  *streamExport(sessionId: string): Generator<string> {
+    const session = this.getSession(sessionId);
+    yield `{"session":${JSON.stringify(session)}`;
+    for (const table of ['participants', 'conversations', 'messages', 'deliveries', 'activities', 'rounds', 'papers']) {
+      if (table === 'papers' && !this.paperProgress(sessionId).total) continue;
+      yield `,"${table}":[`;
+      let first = true;
+      const statement = this.db.prepare(`SELECT ${table === 'activities' ? ACTIVITY_DATA_SQL : 'data'} AS data FROM ${table} WHERE session_id=? ORDER BY ${table === 'papers' ? 'number' : 'rowid'}`);
+      for (const row of statement.iterate(sessionId)) {
+        yield `${first ? '' : ','}${(row as RecordRow).data}`;
+        first = false;
+      }
+      yield ']';
+    }
+    const row = this.db.prepare('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events WHERE session_id=?').get(sessionId) as { sequence: number };
+    yield `,"eventSeq":${row.sequence}`;
+    const progress = this.paperProgress(sessionId);
+    if (progress.total) yield `,"paperProgress":${JSON.stringify(progress)}`;
+    yield '}';
   }
 
   sendMessage(sessionId: string, senderId: string, input: SendMessageInput): Message {
@@ -366,6 +388,7 @@ export class Store extends EventEmitter {
   }
 
   upsertActivity(activity: Activity): void {
+    activity = compactActivity(activity);
     this.transaction(() => {
       const participant = this.getParticipant(activity.sessionId, activity.agentId);
       if (participant.kind !== 'agent') throw new StoreError('Activity belongs to an agent');
