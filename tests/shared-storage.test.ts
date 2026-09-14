@@ -3,8 +3,16 @@ import test from 'node:test';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkSharedWriteStorage } from '../src/server/shared-storage.js';
+import { checkExperimentStorage, checkSharedWriteStorage } from '../src/server/shared-storage.js';
 import { writeSharedFile } from '../src/server/experiment-files.js';
+
+test('experiment admission reserves database and corpus copies above the volume free-space floor', () => {
+  const floor = 2 * 1024 ** 3;
+  const serializedBytes = 4 * 1024 ** 2;
+  assert.throws(() => checkExperimentStorage('/unused', serializedBytes, floor + 16 * 1024 ** 2), /Not enough disk space/);
+  assert.doesNotThrow(() => checkExperimentStorage('/unused', serializedBytes, floor + 40 * 1024 ** 2));
+  assert.throws(() => checkExperimentStorage('/unused', 0, floor), /Not enough disk space/);
+});
 
 test('shared storage counts cumulative bytes and entries, reserves disk space, and permits replacement', () => {
   const root = mkdtempSync(join(tmpdir(), 'mindspace-shared-quota-'));

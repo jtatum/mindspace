@@ -5,6 +5,18 @@ const DEFAULT_SHARED_BYTES = 1024 ** 3;
 const MAX_SHARED_ENTRIES = 10000;
 const FREE_SPACE_FLOOR = 2 * 1024 ** 3;
 
+export function checkExperimentStorage(directory: string, serializedBytes: number, freeBytes?: number) {
+  // Reserve for database rows/indexes/WAL, initial messages and JSONL/CSV copies.
+  // Check before the transaction writes anything; repeated admissions share the
+  // same volume-wide floor as subsequent workspace and paper-cache writes.
+  const allocationReserve = serializedBytes * 8 + 1024 ** 2;
+  if (freeBytes === undefined) {
+    const filesystem = statfsSync(directory);
+    freeBytes = filesystem.bavail * filesystem.bsize;
+  }
+  if (freeBytes - allocationReserve < FREE_SPACE_FLOOR) throw new Error('Not enough disk space to create an experiment while preserving the 2 GiB free-space floor');
+}
+
 export function checkSharedWriteStorage(root: string, target: string, bytes: number, options: { maxBytes?: number; maxEntries?: number; freeBytes?: number } = {}) {
   const maxBytes = options.maxBytes ?? Number(process.env.MINDSPACE_SHARED_MAX_BYTES ?? DEFAULT_SHARED_BYTES);
   const maxEntries = options.maxEntries ?? MAX_SHARED_ENTRIES;

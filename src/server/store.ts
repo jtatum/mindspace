@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { experimentDirectory, safePath, writeSharedFile } from './experiment-files.js';
-import { checkSharedWriteStorage } from './shared-storage.js';
+import { checkExperimentStorage, checkSharedWriteStorage } from './shared-storage.js';
 import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SETTINGS,
@@ -101,6 +101,7 @@ export class Store extends EventEmitter {
   }
 
   createSession(input: CreateSessionInput, human: Human, runtimeMode: Session['runtimeMode'], papers?: Array<{ title: string; url: string }>): Snapshot {
+    if (this.dataDir) checkExperimentStorage(this.dataDir, Buffer.byteLength(JSON.stringify({ input, papers })));
     if (!input.title.trim() || !input.task.trim() || input.agents.length < 3 || input.agents.length > 5) {
       throw new StoreError('A session requires a title, a task, and three to five agents');
     }

@@ -49,6 +49,8 @@ One active turn is permitted per agent. DMs can wake an idle agent or steer its 
 | `MINDSPACE_AUTH_FILE` | `~/.codex/auth.json` | Existing Codex login file used by agent runtime homes. |
 | `PORT` | `3001` | Backend HTTP port; binding stays `127.0.0.1`. |
 
+Creating an experiment checks the volume-wide 2 GiB free-space floor before writing session rows or files, reserving space for SQLite and initial corpus copies. This admission check applies to both freeform and paper experiments.
+
 The dev server, `npm start`, and `papers:download` load an optional `.env` in the project root; exported environment variables take precedence. Copy `.env.example` to `.env` to configure a paper host, then restart the server. This is a backend setting.
 
 The Vite development proxy currently targets port 3001. Keep that backend port when using `npm run dev`; using a different `PORT` requires updating the proxy in `vite.config.ts`. The built application can use a different backend port without a proxy.
