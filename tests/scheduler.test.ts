@@ -100,10 +100,10 @@ class ControlledRuntime implements AgentRuntime {
   tool(name: string, args: unknown, callId = `call:${this.calls.length}:${name}`) { return this.hooks.onTool(name, args, callId); }
 }
 
-function setup(settings: Partial<Settings> = {}) {
+function setup(settings: Partial<Settings> = {}, papers?: Array<{ title: string; url: string }>) {
   const store = new Store(':memory:');
   const human = store.createIdentity('Human observer');
-  const snapshot = store.createSession({ title: 'Collaboration', task: 'Evaluate paper categories.', agents: ['Analyst', 'Critic', 'Synthesist'].map(name => ({ name, instructions: '' })), settings: { roundDelayMs: 1000, turnTimeoutMs: 5000, maxDurationMs: 100000, ...settings } }, human, 'simulation');
+  const snapshot = store.createSession({ title: 'Collaboration', task: 'Evaluate paper categories.', agents: ['Analyst', 'Critic', 'Synthesist'].map(name => ({ name, instructions: '' })), settings: { roundDelayMs: 1000, turnTimeoutMs: 5000, maxDurationMs: 100000, ...settings } }, human, 'simulation', papers);
   const agents = snapshot.participants.filter(p => p.kind === 'agent');
   const calls: Invocation[] = [];
   const clock = new ManualClock();
@@ -166,6 +166,59 @@ test('an all-pass quiet round sleeps without allocating more turns', async () =>
     assert.equal(ctx.calls.length, 3);
     assert.equal(ctx.state().session.turnCount, 3);
     assert.equal(ctx.state().messages.length, 1, 'passing creates activity, not artificial chat messages');
+  } finally { await ctx.close(); }
+});
+
+const reviewPapers = Array.from({ length: 6 }, (_, i) => ({ title: `Paper ${i + 1}`, url: `https://arxiv.org/abs/2609.0000${i + 1}` }));
+
+test('silent reviewers keep working through pending assignments and rest when the queue is complete', async () => {
+  const ctx = setup({}, reviewPapers);
+  try {
+    await ctx.start();
+    for (let turn = 0; turn < 6; turn++) {
+      if (turn === 3) {
+        assert.equal(ctx.state().session.status, 'cooldown');
+        assert.equal(ctx.state().paperProgress?.pending, 3);
+        await ctx.clock.advance(1000);
+      }
+      const call = ctx.calls[turn];
+      const paper = ctx.store.readPapers(ctx.sessionId, { reviewerId: call.agentId, status: 'pending', limit: 1 }).papers[0];
+      await call.runtime.tool('record_paper_review', { paper_number: paper.number, status: 'reviewed', review: 'Saved findings without a chat summary.' });
+      await ctx.finish(turn);
+    }
+    assert.equal(ctx.state().messages.length, 1, 'no group summaries were posted');
+    assert.equal(ctx.state().paperProgress?.pending, 0);
+    assert.equal(ctx.state().session.status, 'idle');
+    await ctx.clock.advance(10000);
+    assert.equal(ctx.calls.length, 6);
+  } finally { await ctx.close(); }
+});
+
+test('paused paper assignments do not spin rounds, and resuming their reviewer wakes the queue', async () => {
+  const ctx = setup({}, reviewPapers.slice(0, 3));
+  try {
+    const paused = ctx.agents[0];
+    await ctx.scheduler.control(ctx.sessionId, 'pause-agent', paused.id);
+    await ctx.start();
+    for (let turn = 0; turn < 2; turn++) {
+      const call = ctx.calls[turn];
+      const paper = ctx.store.readPapers(ctx.sessionId, { reviewerId: call.agentId, status: 'pending', limit: 1 }).papers[0];
+      await call.runtime.tool('record_paper_review', { paper_number: paper.number, status: 'unavailable', review: 'Source unavailable.' });
+      await ctx.finish(turn);
+    }
+    assert.equal(ctx.state().paperProgress?.pending, 1);
+    assert.equal(ctx.state().session.status, 'idle');
+    await ctx.clock.advance(10000);
+    assert.equal(ctx.calls.length, 2);
+    await ctx.scheduler.control(ctx.sessionId, 'resume-agent', paused.id);
+    await flush();
+    assert.equal(ctx.state().session.status, 'running');
+    await ctx.finish(2); await ctx.finish(3);
+    assert.equal(ctx.calls[4].agentId, paused.id);
+    await ctx.calls[4].runtime.tool('record_paper_review', { paper_number: 1, status: 'reviewed', review: 'Resumed review.' });
+    await ctx.finish(4);
+    assert.equal(ctx.state().session.status, 'idle');
+    assert.equal(ctx.state().paperProgress?.pending, 0);
   } finally { await ctx.close(); }
 });
 

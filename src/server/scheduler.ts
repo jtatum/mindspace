@@ -64,6 +64,9 @@ export class Scheduler {
     if (session.settings.maxTokens > 0 && tokens >= session.settings.maxTokens) return 'Token limit reached';
     return null;
   }
+  private hasPendingPapers(agent: Participant): boolean {
+    return !!agent.paperReview && this.store.readPapers(agent.sessionId, { reviewerId: agent.id, status: 'pending', limit: 1 }).papers.length > 0;
+  }
   async control(sessionId: string, action: string, agentId?: string) {
     const session = this.store.getSession(sessionId);
     if (action === 'pause') { await this.pause(sessionId, 'Paused by a human'); return; }
@@ -74,7 +77,10 @@ export class Scheduler {
       const pause = action === 'pause-agent';
       this.store.updateParticipant(sessionId, agentId, { pausedByHuman: pause, status: pause ? 'paused' : 'idle' });
       if (pause) await this.interruptAgent(agentId);
-      else if (session.status !== 'paused') { void this.deliver(sessionId, agentId); this.kick(sessionId); }
+      else if (session.status !== 'paused') {
+        if (session.status === 'idle' && this.hasPendingPapers(agent)) this.store.updateSession(sessionId, { status: 'running', reason: null });
+        void this.deliver(sessionId, agentId); this.kick(sessionId);
+      }
       return;
     }
     if (!['start', 'resume', 'next-round'].includes(action)) throw new Error('Unknown session action');
@@ -373,7 +379,7 @@ export class Scheduler {
       snapshot = this.store.snapshot(sessionId);
       if (snapshot.session.settings.maxTurns > 0 && snapshot.session.turnCount >= snapshot.session.settings.maxTurns) { await this.pause(sessionId, 'Turn limit reached'); return; }
       if (snapshot.session.settings.maxRounds > 0 && round.number >= snapshot.session.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
-      const pendingWork = snapshot.participants.some(p => p.kind === 'agent' && !p.pausedByHuman && (this.active.has(p.id) || this.store.pendingDeliveries(sessionId, p.id).length > 0));
+      const pendingWork = snapshot.participants.some(p => p.kind === 'agent' && !p.pausedByHuman && (this.active.has(p.id) || this.store.pendingDeliveries(sessionId, p.id).length > 0 || this.hasPendingPapers(p)));
       const allQuiet = round.opportunities.every(o => o.status === 'passed' || o.status === 'skipped');
       if (allQuiet && !pendingWork && this.groupSequence(snapshot) === round.startSequence) this.store.updateSession(sessionId, { status: 'idle', reason: 'Everyone passed. Waiting for a new message.', nextRoundAt: null });
       else {
