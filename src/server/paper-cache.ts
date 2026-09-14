@@ -1,14 +1,11 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { experimentDirectory, listSharedFiles, safePath } from './experiment-files.js';
 import type { Paper } from '../shared/types.js';
 import { hostedPdfUrl, papersBaseUrl } from './paper-source.js';
-import { MAX_PAPER_TEXT_CHARACTERS } from './file-limits.js';
-const run = promisify(execFile);
+import { allowPrivatePaperHost, downloadPaperFile } from './paper-download.js';
+import { extractPdf, MAX_HOSTED_PDF_BYTES } from './pdf-extraction.js';
 let queue: Promise<unknown> = Promise.resolve();
 let nextFetchAt = 0;
 const inFlight = new Map<string, Promise<CachedPaper>>();
@@ -31,20 +28,18 @@ async function cache(dataDir: string, sessionId: string, paper: Pick<Paper, 'num
     await access(join(root, pdfPath)); await access(join(root, textPath));
     return result;
   } catch { /* Resume a missing or unfinished paper. Completed PDFs are reused. */ }
-  // Reuse the prepared corpus across experiments, matching both number and URL.
-  try {
-    const prepared = JSON.parse(await readFile(join(dataDir, 'corpora', 'download-experiment.json'), 'utf8'));
-    const corpus = JSON.parse(await readFile(join(dataDir, 'corpora', 'ai-2000.json'), 'utf8'));
-    if (prepared.sessionId !== sessionId && corpus.papers?.[paper.number - 1]?.url === paper.url) {
-      const source = experimentDirectory(dataDir, prepared.sessionId);
-      await copyFile(join(source, pdfPath), join(root, pdfPath));
+  // Match the actual source experiment's immutable list, not a mutable fixture.
+  const source = await preparedPaperDirectory(dataDir, sessionId, paper);
+  if (source) {
+    try {
+      await copyFile(safePath(source, pdfPath), join(root, pdfPath));
       try {
-        await copyFile(join(source, textPath), join(root, textPath));
-        await copyFile(join(source, 'papers', `${stem}.json`), metadata);
+        await copyFile(safePath(source, textPath), join(root, textPath));
+        await copyFile(safePath(source, `papers/${stem}.json`), metadata);
         return JSON.parse(await readFile(metadata, 'utf8')) as CachedPaper;
       } catch { /* PDF is available while extraction may still be running. */ }
-    }
-  } catch { /* No prepared local PDF yet. */ }
+    } catch { /* No prepared local PDF yet. */ }
+  }
   const pdf = join(root, pdfPath);
   try { await access(pdf); }
   catch {
@@ -54,37 +49,34 @@ async function cache(dataDir: string, sessionId: string, paper: Pick<Paper, 'num
     nextFetchAt = Date.now() + 3100;
     const temporary = join(directory, `.${stem}-${randomUUID()}.part`);
     try {
-      const protocols = base ? '=http,https' : '=https';
-      await run('curl', ['--fail', '--silent', '--show-error', '--location', '--proto', protocols, '--proto-redir', protocols, '--max-redirs', '3', '--max-time', base ? '300' : '90', '--max-filesize', base ? '500000000' : '50000000', '--output', temporary, downloadUrl], { timeout: base ? 305000 : 95000, maxBuffer: 10000 });
-      const bytes = await readFile(temporary);
-      if (!bytes.subarray(0, 1024).includes(Buffer.from('%PDF-'))) throw new Error('Paper server did not return a PDF');
+      await downloadPaperFile(downloadUrl, temporary, { maxBytes: base ? MAX_HOSTED_PDF_BYTES : 50000000, timeoutMs: base ? 300000 : 90000, allowPrivate: base ? allowPrivatePaperHost(base) : false });
+      const handle = await open(temporary, 'r');
+      try {
+        const header = Buffer.alloc(1024);
+        const { bytesRead } = await handle.read(header, 0, header.length, 0);
+        if (!header.subarray(0, bytesRead).includes(Buffer.from('%PDF-'))) throw new Error('Paper server did not return a PDF');
+      } finally { await handle.close(); }
       await rename(temporary, pdf);
     } catch (error) {
       nextFetchAt = Date.now() + 60000;
       throw new Error(`PDF download failed; completed papers are preserved. ${error instanceof Error ? error.message : 'Retry later.'}`);
     } finally { await rm(temporary, { force: true }); }
   }
-  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  const pdfResources = new URL('../../', import.meta.resolve('pdfjs-dist/legacy/build/pdf.mjs'));
-  const loadingTask = getDocument({ data: new Uint8Array(await readFile(pdf)), disableFontFace: true, useSystemFonts: false, standardFontDataUrl: fileURLToPath(new URL('standard_fonts/', pdfResources)), cMapUrl: fileURLToPath(new URL('cmaps/', pdfResources)), cMapPacked: true });
-  const document = await loadingTask.promise;
+  const extraction = await extractPdf(pdf, join(root, textPath));
+  const result = { pdfPath, textPath, ...extraction };
+  await writeFile(metadata, JSON.stringify(result), { mode: 0o600 });
+  return result;
+}
+
+export async function preparedPaperDirectory(dataDir: string, sessionId: string, paper: Pick<Paper, 'number' | 'url'>): Promise<string | undefined> {
   try {
-    let text = ''; let extractedCharacters = 0; const pages = document.numPages; let truncated = pages > 300;
-    for (let number = 1; number <= Math.min(pages, 300); number++) {
-      const page = await document.getPage(number);
-      const content = await page.getTextContent();
-      const pageText = content.items.map(item => 'str' in item ? item.str + (item.hasEOL ? '\n' : ' ') : '').join('');
-      extractedCharacters += pageText.trim().length;
-      text += `\n\n--- Page ${number} ---\n${pageText}`;
-      page.cleanup();
-      if (text.length > MAX_PAPER_TEXT_CHARACTERS) { text = text.slice(0, MAX_PAPER_TEXT_CHARACTERS); truncated = true; break; }
-    }
-    if (!extractedCharacters) throw new Error('PDF saved, but no readable text was extracted. It may require OCR.');
-    const result = { pdfPath, textPath, pages, textTruncated: truncated };
-    await writeFile(join(root, textPath), text, { mode: 0o600 });
-    await writeFile(metadata, JSON.stringify(result), { mode: 0o600 });
-    return result;
-  } finally { await loadingTask.destroy(); }
+    const prepared = JSON.parse(await readFile(join(dataDir, 'corpora', 'download-experiment.json'), 'utf8'));
+    if (prepared.sessionId === sessionId) return;
+    const source = experimentDirectory(dataDir, prepared.sessionId);
+    const entries = (await readFile(safePath(source, 'papers.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const matches = entries.filter(entry => entry.number === paper.number);
+    if (matches.length === 1 && matches[0].url === paper.url) return source;
+  } catch { /* Missing or invalid source provenance: download the requested paper. */ }
 }
 
 export function cachePaper(dataDir: string, sessionId: string, paper: Pick<Paper, 'number' | 'url'>): Promise<CachedPaper> {

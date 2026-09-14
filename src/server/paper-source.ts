@@ -1,7 +1,8 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { allowPrivatePaperHost, downloadPaperFile } from './paper-download.js';
 
-const run = promisify(execFile);
 export interface HostedPaper { title: string; url: string }
 
 export function papersBaseUrl(value = process.env.MINDSPACE_PAPERS_BASE_URL): string | undefined {
@@ -51,8 +52,14 @@ export function parseHostedManifest(csv: string): HostedPaper[] {
 let cached: { base: string; expires: number; result: Promise<HostedPaper[]> } | undefined;
 export function fetchHostedPapers(base: string): Promise<HostedPaper[]> {
   if (cached?.base === base && cached.expires > Date.now()) return cached.result;
-  const result = run('curl', ['--fail', '--silent', '--show-error', '--location', '--proto', '=http,https', '--proto-redir', '=http,https', '--max-redirs', '3', '--max-time', '30', '--max-filesize', '5000000', new URL('manifest.csv', base).href], { encoding: 'utf8', maxBuffer: 5000000, timeout: 35000 })
-    .then(({ stdout }) => parseHostedManifest(stdout));
+  const result = (async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mindspace-manifest-'));
+    try {
+      const path = join(directory, 'manifest.csv');
+      await downloadPaperFile(new URL('manifest.csv', base).href, path, { maxBytes: 5000000, timeoutMs: 30000, allowPrivate: allowPrivatePaperHost(base) });
+      return parseHostedManifest(await readFile(path, 'utf8'));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  })();
   cached = { base, expires: Date.now() + 5 * 60000, result };
   void result.catch(() => { if (cached?.result === result) cached = undefined; });
   return result;
