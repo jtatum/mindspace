@@ -24,8 +24,11 @@ export async function downloadPaperFile(urlString: string, destination: string, 
   const address = addresses[0];
   const port = url.port || (url.protocol === 'https:' ? '443' : '80');
   const pinned = address.family === 6 ? `[${address.address}]` : address.address;
+  // Literal addresses already select the checked destination. In particular,
+  // curl cannot parse a bracketed IPv6 literal as the host of a --resolve entry.
+  const resolveArgs = isIP(hostname) ? [] : ['--resolve', `${url.hostname}:${port}:${pinned}`];
   // Do not follow redirects: the configured corpus endpoint is the only grant.
   // Pin DNS and bypass environment proxies so the checked address is used.
-  const { stdout } = await run('curl', ['--disable', '--fail', '--silent', '--show-error', '--noproxy', '*', '--proto', '=http,https', '--resolve', `${url.hostname}:${port}:${pinned}`, '--max-time', String(options.timeoutMs / 1000), '--max-filesize', String(options.maxBytes), '--output', destination, '--write-out', '%{http_code}', url.href], { encoding: 'utf8', maxBuffer: 10000, timeout: options.timeoutMs + 5000 });
+  const { stdout } = await run('curl', ['--disable', '--fail', '--silent', '--show-error', '--noproxy', '*', '--proto', '=http,https', ...resolveArgs, '--max-time', String(options.timeoutMs / 1000), '--max-filesize', String(options.maxBytes), '--output', destination, '--write-out', '%{http_code}', url.href], { encoding: 'utf8', maxBuffer: 10000, timeout: options.timeoutMs + 5000 });
   if (!/^2\d\d$/.test(stdout.trim())) throw new Error(`Paper server returned HTTP ${stdout.trim()}; redirects are not allowed. Configure a direct corpus URL.`);
 }

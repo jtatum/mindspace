@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, truncateSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, truncateSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -38,6 +38,28 @@ test('hosted manifest and PDF requests never follow redirects to another endpoin
     await assert.rejects(downloadPaperFile(`${base}private`, join(directory, 'private'), { maxBytes: 1000, timeoutMs: 1000 }), /private address/);
     assert.equal(hits.length, 2, 'unapproved private addresses are rejected before HTTP');
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('literal IPv6 corpus endpoints download without a DNS override', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mindspace-ipv6-'));
+  const hits: string[] = [];
+  const server = createServer((req, res) => {
+    hits.push(req.url!);
+    res.end('%PDF- IPv6 fixture');
+  });
+  try {
+    server.listen(0, '::1'); await once(server, 'listening');
+    const { port } = server.address() as { port: number };
+    const destination = join(directory, 'paper.pdf');
+    const url = `http://[::1]:${port}/papers/0001.pdf`;
+    await downloadPaperFile(url, destination, { maxBytes: 1000, timeoutMs: 2000, allowPrivate: true });
+    assert.equal(readFileSync(destination, 'utf8'), '%PDF- IPv6 fixture');
+    await assert.rejects(downloadPaperFile(url, destination, { maxBytes: 1000, timeoutMs: 2000 }), /private address/);
+    assert.deepEqual(hits, ['/papers/0001.pdf']);
+  } finally {
+    if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('prepared PDF reuse trusts the source experiment list rather than the current fixture', async () => {
