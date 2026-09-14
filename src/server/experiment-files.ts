@@ -55,7 +55,7 @@ export function assertSharedWritePath(name: string) {
   if (name.includes('\\')) throw new Error('Use forward slashes in shared file paths');
   // Apply the same policy on case-sensitive and case-insensitive volumes.
   const folded = name.toLowerCase();
-  if (['papers', 'papers.jsonl', 'papers.csv'].includes(folded) || folded.startsWith('papers/')) throw new Error('Imported papers are read-only; write reviews and notes separately');
+  if (['papers', 'papers.jsonl', 'papers.csv', 'manifest.csv'].includes(folded) || folded.startsWith('papers/')) throw new Error('Imported papers are read-only; write reviews and notes separately');
   if (folded === 'reviews') throw new Error('The reviews directory is reserved for review files');
   const numberedReview = /^reviews\/(\d+)\.md(?:\/|$)/i.exec(name);
   if ((folded.startsWith('reviews/') && !name.startsWith('reviews/')) ||

@@ -124,7 +124,7 @@ test('shared files prevent lost updates, protect imported lists, and reject trav
     writeSharedFile(root, 'notes/fox.md', 'Second draft', created.revision);
     assert.throws(() => writeSharedFile(root, 'notes/fox.md', 'Stale draft', created.revision), /changed/);
     assert.equal(readSharedFile(root, 'notes/fox.md').text, 'Second draft');
-    for (const path of ['papers', 'PAPERS', 'papers.jsonl', 'PAPERS.JSONL', 'Papers.csv', 'Papers/0001.pdf']) {
+    for (const path of ['papers', 'PAPERS', 'papers.jsonl', 'PAPERS.JSONL', 'Papers.csv', 'Papers/0001.pdf', 'manifest.csv', 'MANIFEST.CSV']) {
       assert.throws(() => writeSharedFile(root, path, 'overwrite', null), /read-only/);
     }
     for (const path of ['reviews', 'REVIEWS']) assert.throws(() => writeSharedFile(root, path, 'block directory', null), /reserved/);

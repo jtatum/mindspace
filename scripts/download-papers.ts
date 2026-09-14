@@ -3,7 +3,8 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cachePaper } from '../src/server/paper-cache.js';
 import { experimentDirectory } from '../src/server/experiment-files.js';
-export async function downloadPapers(dataDir: string, sessionId: string, options: { cache?: typeof cachePaper; sleep?: (ms: number) => Promise<void> } = {}) {
+import { publishPreparedCorpus } from '../src/server/prepared-corpus.js';
+export async function downloadPapers(dataDir: string, sessionId: string, options: { cache?: typeof cachePaper; sleep?: (ms: number) => Promise<void>; prepare?: typeof publishPreparedCorpus } = {}) {
   const cache = options.cache ?? cachePaper;
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   let consecutiveDownloadFailures = 0;
@@ -13,7 +14,9 @@ export async function downloadPapers(dataDir: string, sessionId: string, options
   const failures: Array<{ number: number; error: string; stage: 'download' | 'extraction' }> = [];
   async function progress(running: boolean, currentPaper: number) {
     const files = await readdir(join(directory, 'papers')).catch(() => [] as string[]);
-    const value = { sessionId, total: papers.length, downloaded: files.filter(name => /^\d+\.pdf$/.test(name)).length, extracted: files.filter(name => /^\d+\.json$/.test(name)).length, running, currentPaper, failures, updatedAt: new Date().toISOString() };
+    const names = new Set(files);
+    const count = (extension: string) => papers.filter(paper => names.has(`${String(paper.number).padStart(4, '0')}.${extension}`)).length;
+    const value = { sessionId, total: papers.length, downloaded: count('pdf'), extracted: count('json'), running, currentPaper, failures, updatedAt: new Date().toISOString() };
     await writeFile(join(directory, 'download-status.tmp'), JSON.stringify(value, null, 2));
     await rename(join(directory, 'download-status.tmp'), join(directory, 'download-status.json'));
     return value;
@@ -46,6 +49,7 @@ export async function downloadPapers(dataDir: string, sessionId: string, options
     }
   }
   const final = await progress(false, currentPaper);
+  if (final.downloaded === final.total) await (options.prepare ?? publishPreparedCorpus)(dataDir, sessionId, papers);
   console.log(JSON.stringify(final));
   return final;
 }

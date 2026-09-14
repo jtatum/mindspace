@@ -90,9 +90,11 @@ test('OCR failures do not stop later PDF downloads, but three download failures 
     mkdirSync(join(root, 'papers'), { recursive: true });
     writeFileSync(join(root, 'papers.jsonl'), papers.map(paper => JSON.stringify(paper)).join('\n'));
     const visited: number[] = [];
+    let prepared = false;
     try {
       const result = await downloadPapers(directory, 'batch', {
         sleep: async () => {},
+        prepare: async () => { prepared = true; },
         cache: async (_dataDir, _sessionId, paper) => {
           visited.push(paper.number);
           const pdfPath = `papers/${String(paper.number).padStart(4, '0')}.pdf`;
@@ -102,6 +104,7 @@ test('OCR failures do not stop later PDF downloads, but three download failures 
         },
       });
       assert.equal(result.currentPaper, extractionOnly ? 5 : 3);
+      assert.equal(prepared, extractionOnly, 'only complete downloads are published');
       assert.equal(visited.includes(5), extractionOnly);
       assert.deepEqual(result.failures.map(f => f.stage), Array(3).fill(extractionOnly ? 'extraction' : 'download'));
     } finally { rmSync(directory, { recursive: true, force: true }); }
