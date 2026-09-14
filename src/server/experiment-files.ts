@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { MAX_SHARED_TEXT_BYTES } from './file-limits.js';
+import { checkSharedWriteStorage } from './shared-storage.js';
 
 export function experimentDirectory(dataDir: string, sessionId: string) {
   if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw new Error('Invalid experiment identifier');
@@ -56,7 +57,7 @@ export function assertSharedWritePath(name: string) {
   const folded = name.toLowerCase();
   if (['papers', 'papers.jsonl', 'papers.csv'].includes(folded) || folded.startsWith('papers/')) throw new Error('Imported papers are read-only; write reviews and notes separately');
   if (folded === 'reviews') throw new Error('The reviews directory is reserved for review files');
-  const numberedReview = /^reviews\/(\d+)\.md$/i.exec(name);
+  const numberedReview = /^reviews\/(\d+)\.md(?:\/|$)/i.exec(name);
   if ((folded.startsWith('reviews/') && !name.startsWith('reviews/')) ||
       (numberedReview && name !== `reviews/${String(Number(numberedReview[1])).padStart(4, '0')}.md`)) {
     throw new Error('Use the canonical review path reviews/NNNN.md');
@@ -68,6 +69,7 @@ export function writeSharedFile(root: string, name: string, text: string, expect
   if (Buffer.byteLength(text) > 200000) throw new Error('Write at most 200 KB per file');
   const current = existsSync(path) ? readSharedFile(root, name).revision : null;
   if (current !== expectedRevision) throw new Error('File changed or already exists. Read it and merge your changes before retrying.');
+  checkSharedWriteStorage(root, path, Buffer.byteLength(text));
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // All application writes are synchronous and atomic, so compare/write cannot
   // interleave across agent callbacks in this single-owner local application.

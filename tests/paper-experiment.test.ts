@@ -43,6 +43,9 @@ test('reviewer tool callbacks read paper text and save review files with durable
     const pending = await fox('read_papers', { assigned_to_self: true, status: 'pending', limit: 3 });
     assert.deepEqual(pending.papers.map((p: any) => p.number), [1, 4, 7]);
     assert.match((await fox('read_shared_file', { path: 'papers/0001.txt' })).text, /classification/);
+    for (const path of ['reviews/0001.md/blocker.txt', 'Reviews/0001.MD/blocker.txt']) {
+      await assert.rejects(horse('write_shared_file', { path, text: 'Block', expected_revision: null }), /canonical/);
+    }
     const review = '# AI paper 1\n\nSource: https://arxiv.org/abs/2609.00001\n\nThe authors claim a benchmark improvement. External validity is untested.';
     const saved = await fox('write_shared_file', { path: 'reviews/0001.md', text: review, expected_revision: null });
     assert.equal(saved.status, 'reviewed');

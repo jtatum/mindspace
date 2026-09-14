@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { experimentDirectory, safePath, writeSharedFile } from './experiment-files.js';
+import { checkSharedWriteStorage } from './shared-storage.js';
 import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SETTINGS,
@@ -265,9 +266,13 @@ export class Store extends EventEmitter {
       if (this.dataDir) {
         const root = experimentDirectory(this.dataDir, sessionId);
         const path = safePath(root, `reviews/${String(number).padStart(4, '0')}.md`);
-        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
         if (file) writeSharedFile(root, `reviews/${String(number).padStart(4, '0')}.md`, review, file.expectedRevision);
-        else writeFileSync(path, `# ${paper.number}. ${paper.title}\n\nSource: ${paper.url}\nReviewer: ${agent.name}\nStatus: ${status}\n\n${paper.review}\n`, { mode: 0o600 });
+        else {
+          const text = `# ${paper.number}. ${paper.title}\n\nSource: ${paper.url}\nReviewer: ${agent.name}\nStatus: ${status}\n\n${paper.review}\n`;
+          checkSharedWriteStorage(root, path, Buffer.byteLength(text));
+          mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+          writeFileSync(path, text, { mode: 0o600 });
+        }
       }
       this.event(sessionId, 'paper.reviewed', { number, reviewerId: agentId, status });
       return paper;
