@@ -53,6 +53,9 @@ test('reviewer tool callbacks read paper text and save review files with durable
     assert.equal(store.paperProgress(sessionId).reviewed, 1);
     assert.equal((await fox('read_papers', { assigned_to_self: true, status: 'pending' })).papers[0].number, 4);
     assert.equal((await horse('read_shared_file', { path: 'reviews/0001.md' })).text, review);
+    for (const path of ['reviews/0001.md.', 'reviews/0001.md ', 'reviews./0001.md', 'papers.jsonl.', 'papers.csv ', 'papers /0001.pdf']) {
+      await assert.rejects(horse('write_shared_file', { path, text: 'Clobber', expected_revision: saved.revision }), /dots or spaces/);
+    }
     await assert.rejects(horse('write_shared_file', { path: 'reviews/0001.md', text: 'Clobber', expected_revision: saved.revision }), /assigned reviewer/);
     for (const path of ['Reviews/0001.md', 'reviews/0001.MD', 'REVIEWS/0001.MD']) {
       await assert.rejects(horse('write_shared_file', { path, text: 'Clobber', expected_revision: saved.revision }), /canonical/);
