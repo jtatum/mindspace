@@ -176,3 +176,19 @@ test('resuming a saved PDF reserves extraction capacity before starting the pars
     assert.equal(existsSync(join(root, 'papers/0001.pdf')), true);
   } finally { rmSync(data, { recursive: true, force: true }); }
 });
+
+test('a dual-stack hostname reaches an IPv4-only server and chunked responses obey the byte cap', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mindspace-multi-address-'));
+  const server = createServer((req, res) => {
+    if (req.url === '/large') { res.writeHead(200, { 'Transfer-Encoding': 'chunked' }); res.end('x'.repeat(100000)); }
+    else res.end('%PDF- IPv4 listener');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  const base = `http://localhost:${port}`;
+  try {
+    await downloadPaperFile(`${base}/paper`, join(directory, 'paper.pdf'), { maxBytes: 1024, timeoutMs: 5000, allowPrivate: true });
+    assert.equal(readFileSync(join(directory, 'paper.pdf'), 'utf8'), '%PDF- IPv4 listener');
+    await assert.rejects(downloadPaperFile(`${base}/large`, join(directory, 'large.pdf'), { maxBytes: 1024, timeoutMs: 5000, allowPrivate: true }), /maximum file size|exceeded|63/i);
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(directory, { recursive: true, force: true }); }
+});
