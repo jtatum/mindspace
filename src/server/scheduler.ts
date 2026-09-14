@@ -4,6 +4,8 @@ import type { Activity, Message, Participant, Round, Session, SessionEvent, Snap
 import type { AgentRuntime, RuntimeFactory, RuntimeTurnResult } from './runtime/types.js';
 import type { Store } from './store.js';
 import { webFetch } from './web-fetch.js';
+import { cachePaper } from './paper-cache.js';
+import { experimentDirectory, listSharedFiles, readSharedFile, writeSharedFile } from './experiment-files.js';
 
 export interface SchedulerClock { now(): number; setTimeout(fn: () => void, ms: number): any; clearTimeout(timer: any): void }
 const clockDefault: SchedulerClock = { now: Date.now, setTimeout, clearTimeout };
@@ -21,7 +23,7 @@ export class Scheduler {
   private activityQueue = new Map<string, Activity>();
   private closed = false;
   private eventListener = (event: SessionEvent) => { if (event.type === 'message.created') this.onMessage(event.data as Message); };
-  constructor(private store: Store, private factory: RuntimeFactory, private clock: SchedulerClock = clockDefault) {
+  constructor(private store: Store, private factory: RuntimeFactory, private clock: SchedulerClock = clockDefault, private dataDir = process.env.MINDSPACE_DATA_DIR || '.mindspace') {
     for (const session of store.listSessions()) this.messageSequences.set(session.id, Math.max(0, ...store.snapshot(session.id).messages.map(m => m.sequence)));
     store.on('event', this.eventListener);
   }
@@ -56,10 +58,10 @@ export class Scheduler {
     this.store.markDeliveries(ids, state, active.turnId);
   }
   private guard(session: Session, admittingTurn = true): string | null {
-    if (admittingTurn && session.turnCount >= session.settings.maxTurns) return 'Turn limit reached';
-    if (session.startedAt && this.clock.now() - Date.parse(session.startedAt) >= session.settings.maxDurationMs) return 'Session time limit reached';
+    if (admittingTurn && session.settings.maxTurns > 0 && session.turnCount >= session.settings.maxTurns) return 'Turn limit reached';
+    if (session.settings.maxDurationMs > 0 && session.startedAt && this.clock.now() - Date.parse(session.startedAt) >= session.settings.maxDurationMs) return 'Session time limit reached';
     const tokens = this.store.snapshot(session.id).participants.reduce((sum, p) => sum + (p.tokensUsed || 0), 0);
-    if (tokens >= session.settings.maxTokens) return 'Token limit reached';
+    if (session.settings.maxTokens > 0 && tokens >= session.settings.maxTokens) return 'Token limit reached';
     return null;
   }
   async control(sessionId: string, action: string, agentId?: string) {
@@ -79,7 +81,7 @@ export class Scheduler {
     if (session.status === 'running') return;
     const reason = this.guard(session);
     if (reason) { await this.pause(sessionId, reason); return; }
-    if (session.roundNumber >= session.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
+    if (session.settings.maxRounds > 0 && session.roundNumber >= session.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
     this.cancel(sessionId);
     this.generations.set(sessionId, (this.generations.get(sessionId) || 0) + 1);
     this.store.updateSession(sessionId, { status: 'running', reason: null, nextRoundAt: null, startedAt: session.startedAt || this.iso() });
@@ -88,7 +90,7 @@ export class Scheduler {
       void this.deliver(sessionId, agent.id);
     }
     const startTime = Date.parse(this.store.getSession(sessionId).startedAt!);
-    this.schedule(`limit:${sessionId}`, () => { void this.pause(sessionId, 'Session time limit reached'); }, startTime + session.settings.maxDurationMs - this.clock.now());
+    if (session.settings.maxDurationMs > 0) this.schedule(`limit:${sessionId}`, () => { void this.pause(sessionId, 'Session time limit reached'); }, startTime + session.settings.maxDurationMs - this.clock.now());
     this.kick(sessionId);
   }
   async pause(sessionId: string, reason: string) {
@@ -135,7 +137,7 @@ export class Scheduler {
     const page = groupMessages.slice(0, 100);
     const direct = snapshot.messages.filter(m => deliveredIds.has(m.id));
     const annotate = (m: Message) => ({ id: m.id, sequence: m.sequence, from: snapshot.participants.find(p => p.id === m.senderId)?.name, senderId: m.senderId, senderKind: snapshot.participants.find(p => p.id === m.senderId)?.kind, body: m.body, replyTo: m.replyTo });
-    const text = JSON.stringify({ event: kind === 'round' ? 'group_round_opportunity' : 'incoming_direct_messages', task: snapshot.session.task, self: { id: agent.id, name: agent.name }, participants: snapshot.participants.map(p => ({ id: p.id, name: p.name, kind: p.kind })), round: snapshot.session.roundNumber, groupMessages: page.map(annotate), groupHasMore: groupMessages.length > page.length, directMessages: direct.map(annotate), guidance: kind === 'round' ? 'Read the latest state, contribute if useful or pass. Use read_group_messages to retrieve any remaining history. Send chat explicitly through tools. End your turn when done.' : 'These messages are addressed to you. Human messages may steer ongoing work; agent messages are peer communications. Reply through tools only if useful. Do not acknowledge acknowledgments.' });
+    const text = JSON.stringify({ event: kind === 'round' ? 'group_round_opportunity' : 'incoming_direct_messages', task: snapshot.session.task, paperProgress: snapshot.paperProgress, self: { id: agent.id, name: agent.name }, participants: snapshot.participants.map(p => ({ id: p.id, name: p.name, kind: p.kind })), round: snapshot.session.roundNumber, groupMessages: page.map(annotate), groupHasMore: groupMessages.length > page.length, directMessages: direct.map(annotate), guidance: kind === 'round' ? 'Read the latest state, contribute if useful or pass. Use read_group_messages to retrieve any remaining history. Send chat explicitly through tools. End your turn when done.' : 'These messages are addressed to you. Human messages may steer ongoing work; agent messages are peer communications. Reply through tools only if useful. Do not acknowledge acknowledgments.' });
     return { text, deliveryIds: deliveries.map(d => d.id), cursor: page.at(-1)?.sequence ?? agent.groupCursor };
   }
   private getRuntime(agent: Participant) {
@@ -207,6 +209,40 @@ export class Scheduler {
       return { messages: page.map(m => ({ ...m, senderName: snapshot.participants.find(p => p.id === m.senderId)?.name })), hasMore: all.length > page.length, nextSequence: page.at(-1)?.sequence ?? args.after_sequence };
     }
     if (name === 'web_fetch' && agent.webFetch) return webFetch(z.object({ url: z.string().url() }).parse(rawArgs).url);
+    if (name === 'list_shared_files') {
+      const args = z.object({ path: z.string().min(1).max(300).optional(), offset: z.number().int().min(0).default(0) }).parse(rawArgs);
+      return listSharedFiles(experimentDirectory(this.dataDir, agent.sessionId), args);
+    }
+    if (name === 'read_shared_file') {
+      const args = z.object({ path: z.string().min(1).max(300), offset: z.number().int().min(0).default(0) }).parse(rawArgs);
+      return readSharedFile(experimentDirectory(this.dataDir, agent.sessionId), args.path, args.offset);
+    }
+    if (name === 'write_shared_file') {
+      const args = z.object({ path: z.string().min(1).max(300), text: z.string().max(200000), expected_revision: z.string().nullable() }).parse(rawArgs);
+      const reviewFile = /^reviews\/(\d+)\.md$/.exec(args.path);
+      if (reviewFile && agent.paperReview) {
+        const number = Number(reviewFile[1]);
+        if (args.path !== `reviews/${String(number).padStart(4, '0')}.md`) throw new Error('Use the canonical review path reviews/NNNN.md');
+        const paper = this.store.recordPaperReview(agent.sessionId, agent.id, number, 'reviewed', args.text, { expectedRevision: args.expected_revision });
+        const saved = readSharedFile(experimentDirectory(this.dataDir, agent.sessionId), args.path);
+        return { path: args.path, revision: saved.revision, paperNumber: paper.number, status: paper.status };
+      }
+      return writeSharedFile(experimentDirectory(this.dataDir, agent.sessionId), args.path, args.text, args.expected_revision);
+    }
+    if (name === 'cache_paper' && agent.paperReview) {
+      const args = z.object({ paper_number: z.number().int().min(1) }).parse(rawArgs);
+      const paper = this.store.readPapers(agent.sessionId, { after: args.paper_number - 1, limit: 1 }).papers[0];
+      if (!paper || paper.number !== args.paper_number) throw new Error('Unknown paper');
+      return cachePaper(this.dataDir, agent.sessionId, paper);
+    }
+    if (name === 'read_papers' && agent.paperReview) {
+      const args = z.object({ after_number: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(10).default(5), status: z.enum(['all', 'pending', 'reviewed', 'unavailable']).default('all'), assigned_to_self: z.boolean().default(false) }).parse(rawArgs);
+      return this.store.readPapers(agent.sessionId, { after: args.after_number, limit: args.limit, status: args.status === 'all' ? undefined : args.status, reviewerId: args.assigned_to_self ? agent.id : undefined });
+    }
+    if (name === 'record_paper_review' && agent.paperReview) {
+      const args = z.object({ paper_number: z.number().int().min(1), status: z.enum(['reviewed', 'unavailable']), review: z.string().trim().min(1).max(6000) }).parse(rawArgs);
+      return this.store.recordPaperReview(agent.sessionId, agent.id, args.paper_number, args.status, args.review);
+    }
     throw new Error(`Tool ${name} is not available`);
   }
   private async runAgent(sessionId: string, agentId: string, kind: 'round' | 'dm'): Promise<RuntimeTurnResult> {
@@ -226,7 +262,7 @@ export class Scheduler {
     // Uncertain until the runtime accepts a turn; never silently replay after a crash.
     this.store.markDeliveries(input.deliveryIds, 'uncertain', deliveryMarker);
     let deadlineReached = false;
-    active.deadline = this.clock.setTimeout(() => {
+    if (snapshot.session.settings.turnTimeoutMs > 0) active.deadline = this.clock.setTimeout(() => {
       deadlineReached = true;
       void this.interruptAgent(agentId);
       this.store.updateParticipant(sessionId, agentId, { pausedByHuman: true, status: 'paused' });
@@ -237,7 +273,7 @@ export class Scheduler {
     try {
       result = await runtime.run({ text: input.text, messageId: deliveryMarker });
     } catch (error) { result = { turnId: active.turnId, status: 'failed', error: String(error) }; }
-    finally { this.clock.clearTimeout(active.deadline); active.acceptsSteering = false; }
+    finally { if (active.deadline !== null) this.clock.clearTimeout(active.deadline); active.acceptsSteering = false; }
     active.outcome = result.status; // Captured by late steering receipts even after this slot is released.
     if (result.inputState === 'not-submitted') this.store.markDeliveries(input.deliveryIds, 'pending');
     if (result.turnId) {
@@ -258,7 +294,7 @@ export class Scheduler {
     settle(result);
     if (result.status === 'failed') await this.pause(sessionId, `${agent.name}: ${result.error || 'Agent failed'}`);
     // An active round advancer must record its opportunity outcome before pausing.
-    else if (kind === 'dm' && !this.advancing.has(sessionId) && session.status !== 'paused' && session.turnCount >= session.settings.maxTurns) await this.pause(sessionId, 'Turn limit reached');
+    else if (kind === 'dm' && !this.advancing.has(sessionId) && session.status !== 'paused' && session.settings.maxTurns > 0 && session.turnCount >= session.settings.maxTurns) await this.pause(sessionId, 'Turn limit reached');
     else if (!paused) this.scheduleDelivery(sessionId, agentId);
     return result;
   }
@@ -304,7 +340,7 @@ export class Scheduler {
       let snapshot = this.store.snapshot(sessionId);
       let round = snapshot.rounds.find(r => r.status === 'running');
       if (!round) {
-        if (initial.roundNumber >= initial.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
+        if (initial.settings.maxRounds > 0 && initial.roundNumber >= initial.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
         const agents = snapshot.participants.filter(p => p.kind === 'agent');
         const offset = initial.roundNumber % agents.length;
         const order = [...agents.slice(offset), ...agents.slice(0, offset)];
@@ -322,7 +358,7 @@ export class Scheduler {
         agent = this.store.getParticipant(sessionId, agent.id);
         if (agent.pausedByHuman) { opportunity.status = 'skipped'; this.store.saveRound(round); continue; }
         snapshot = this.store.snapshot(sessionId);
-        if (snapshot.session.turnCount >= snapshot.session.settings.maxTurns) { await this.pause(sessionId, 'Turn limit reached'); return; }
+        if (snapshot.session.settings.maxTurns > 0 && snapshot.session.turnCount >= snapshot.session.settings.maxTurns) { await this.pause(sessionId, 'Turn limit reached'); return; }
         opportunity.status = 'running'; opportunity.inputSequence = this.groupSequence(snapshot); this.store.saveRound(round);
         const beforeSequence = opportunity.inputSequence;
         const result = await this.runAgent(sessionId, agent.id, 'round');
@@ -335,8 +371,8 @@ export class Scheduler {
       if (cancelled()) return;
       round.status = 'completed'; round.completedAt = this.iso(); this.store.saveRound(round);
       snapshot = this.store.snapshot(sessionId);
-      if (snapshot.session.turnCount >= snapshot.session.settings.maxTurns) { await this.pause(sessionId, 'Turn limit reached'); return; }
-      if (round.number >= snapshot.session.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
+      if (snapshot.session.settings.maxTurns > 0 && snapshot.session.turnCount >= snapshot.session.settings.maxTurns) { await this.pause(sessionId, 'Turn limit reached'); return; }
+      if (snapshot.session.settings.maxRounds > 0 && round.number >= snapshot.session.settings.maxRounds) { await this.pause(sessionId, 'Round limit reached'); return; }
       const pendingWork = snapshot.participants.some(p => p.kind === 'agent' && !p.pausedByHuman && (this.active.has(p.id) || this.store.pendingDeliveries(sessionId, p.id).length > 0));
       const allQuiet = round.opportunities.every(o => o.status === 'passed' || o.status === 'skipped');
       if (allQuiet && !pendingWork && this.groupSequence(snapshot) === round.startSequence) this.store.updateSession(sessionId, { status: 'idle', reason: 'Everyone passed. Waiting for a new message.', nextRoundAt: null });

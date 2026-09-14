@@ -1,6 +1,6 @@
 # Codex runtime policy
 
-Mindspace pins `codex-cli 0.154.0` and `gpt-5.6-terra` with `high` reasoning. Each agent gets a separate App Server process, Codex home, workspace, and persistent Codex thread. The browser talks to the Mindspace backend; it cannot send arbitrary App Server requests.
+Mindspace pins `codex-cli 0.154.0` and `gpt-5.6-terra` with `high` reasoning. Each agent gets a separate App Server process, Codex home and persistent Codex thread. Agents in the same experiment share a working directory. The browser talks to the Mindspace backend; it cannot send arbitrary App Server requests.
 
 ## Why disabling feature flags was insufficient
 
@@ -69,8 +69,14 @@ node --import tsx --test tests/runtime-policy.test.ts
 The integration test starts the installed Codex binary against a local fake Responses endpoint, with ephemeral authentication and no login file. It inspects the outgoing model request, including tool definitions in `input[type=additional_tools]`, and asserts:
 
 - The requested model remains `gpt-5.6-terra` and reasoning remains `high`.
-- The complete exposed tool set equals the four supplied Mindspace tools.
+- The complete exposed tool set equals the supplied Mindspace chat, shared-file and optional paper tools (see the update below).
 - No authorization header, host skill instructions, global agent instructions, or built-in agent instructions leak into the request.
 - The runtime home is private and the environment does not inherit credentials.
 
 All three policy tests passed on 2026-09-13 with Codex 0.154.0. They make no upstream model request. A live spike separately verifies model access, tool execution, streaming, steering, and restart persistence; the policy test does not establish those behaviors.
+
+## Shared experiment workspace and paper tools (September 13 update)
+
+All agents in an experiment now use `.mindspace/experiments/<session-id>/shared` as their working directory while retaining separate per-agent Codex homes and threads. This intentionally permits collaboration through files. It does not expose another agent’s private runtime state. The enabled tools now also include `list_shared_files`, `read_shared_file`, and `write_shared_file`; writes are scoped to the shared directory and require a revision match for existing files. Traversal, hidden paths and symlinks within the shared root are rejected.
+
+AI paper presets additionally expose `read_papers`, `record_paper_review`, and `cache_paper`. The server binds each call to the real experiment/agent; only an assigned reviewer can change a paper review. PDF caching accepts a stored paper number rather than an arbitrary URL, uses curl for the fixed arXiv PDF endpoint, and extracts text with pdfjs-dist. General `web_fetch` retains its public-network restriction. Agents do not receive shell tools or unrestricted filesystem access. The credential-free runtime probe now verifies this expanded tool catalog.

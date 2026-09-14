@@ -1,13 +1,14 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { experimentDirectory, safePath, writeSharedFile } from './experiment-files.js';
 import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_EFFORT, DEFAULT_MODEL, DEFAULT_SETTINGS,
   type Activity, type Conversation, type CreateSessionInput, type Delivery,
   type Identity, type Message, type Participant, type Round, type SendMessageInput,
-  type Session, type SessionEvent, type Snapshot,
+  type Session, type SessionEvent, type Snapshot, type Paper, type PaperProgress,
 } from '../shared/types.js';
 
 type Human = Pick<Identity, 'id' | 'name'>;
@@ -25,9 +26,11 @@ export class StoreError extends Error {
 export class Store extends EventEmitter {
   private db: DatabaseSync;
   private transactionEvents: SessionEvent[] | null = null;
+  private dataDir?: string;
 
   constructor(path: string) {
     super();
+    this.dataDir = path === ':memory:' ? undefined : dirname(path);
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec(`
@@ -46,6 +49,7 @@ export class Store extends EventEmitter {
       CREATE TABLE IF NOT EXISTS rounds (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), type TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS event_session ON events(session_id,sequence);
+      CREATE TABLE IF NOT EXISTS papers (session_id TEXT NOT NULL REFERENCES sessions(id), number INTEGER NOT NULL, reviewer_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,number));
       PRAGMA user_version=1;
     `);
   }
@@ -95,7 +99,7 @@ export class Store extends EventEmitter {
     return this.db.prepare('SELECT data FROM sessions ORDER BY rowid DESC').all().map(row => decode<Session>(row)!);
   }
 
-  createSession(input: CreateSessionInput, human: Human, runtimeMode: Session['runtimeMode']): Snapshot {
+  createSession(input: CreateSessionInput, human: Human, runtimeMode: Session['runtimeMode'], papers?: Array<{ title: string; url: string }>): Snapshot {
     if (!input.title.trim() || !input.task.trim() || input.agents.length < 3 || input.agents.length > 5) {
       throw new StoreError('A session requires a title, a task, and three to five agents');
     }
@@ -113,15 +117,52 @@ export class Store extends EventEmitter {
           id: randomUUID(), sessionId: session.id, kind: 'agent', name: agent.name.trim(), color: colors[index],
           instructions: agent.instructions, model: DEFAULT_MODEL, effort: DEFAULT_EFFORT, webFetch: agent.webFetch ?? false,
           status: 'paused', threadId: null, tokensUsed: null, groupCursor: 0,
+          ...(papers ? { paperReview: true } : {}),
         };
         this.db.prepare('INSERT INTO participants(session_id,id,data) VALUES(?,?,?)').run(session.id, participant.id, JSON.stringify(participant));
         this.event(session.id, 'participant.joined', participant);
       });
+      if (papers) {
+        const reviewers = this.snapshot(session.id).participants.filter(p => p.kind === 'agent').slice(0, 3);
+        const insert = this.db.prepare('INSERT INTO papers(session_id,number,reviewer_id,status,data) VALUES(?,?,?,?,?)');
+        papers.forEach((paper, index) => {
+          const record: Paper = { ...paper, number: index + 1, reviewerId: reviewers[index % 3].id, status: 'pending', review: null };
+          insert.run(session.id, record.number, record.reviewerId, record.status, JSON.stringify(record));
+        });
+        this.event(session.id, 'papers.imported', this.paperProgress(session.id));
+      }
       const group: Conversation = { id: randomUUID(), sessionId: session.id, kind: 'group', participantIds: [], createdAt: now() };
       this.db.prepare('INSERT INTO conversations(id,session_id,pair_key,data) VALUES(?,?,?,?)').run(group.id, session.id, 'group', JSON.stringify(group));
       this.event(session.id, 'conversation.created', group);
       this.sendMessage(session.id, human.id, { body: session.task, requestId: 'initial-task' });
+      if (this.dataDir) {
+        const directory = experimentDirectory(this.dataDir, session.id);
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        writeFileSync(join(directory, 'README.md'), `# ${session.title}\n\n${session.task}\n\nAll agents share this directory. Use separate notes files or coordinate shared edits.\n`, { mode: 0o600 });
+        if (papers) {
+          const records = this.exportPapers(session.id);
+          writeFileSync(join(directory, 'papers.jsonl'), records.map(({ number, title, url, reviewerId }) => JSON.stringify({ number, title, url, reviewerId })).join('\n') + '\n', { mode: 0o600 });
+          const csv = (value: string) => `"${value.replaceAll('"', '""')}"`;
+          writeFileSync(join(directory, 'papers.csv'), 'number,title,url,reviewer_id\n' + records.map(p => [p.number, csv(p.title), csv(p.url), csv(p.reviewerId)].join(',')).join('\n') + '\n', { mode: 0o600 });
+        }
+      }
       return this.snapshot(session.id);
+    });
+  }
+
+  addAgent(sessionId: string, input: { name: string; instructions: string; webFetch: boolean }, humanId: string): Participant {
+    return this.transaction(() => {
+      const session = this.getSession(sessionId);
+      if (this.getParticipant(sessionId, humanId).kind !== 'human') throw new StoreError('Only humans can add agents', 403);
+      const agents = this.snapshot(sessionId).participants.filter(p => p.kind === 'agent');
+      if (agents.length >= 5) throw new StoreError('An experiment supports at most five agents');
+      if (agents.some(p => p.name.toLowerCase() === input.name.trim().toLowerCase())) throw new StoreError('Choose a different agent name');
+      const agent: Participant = { id: randomUUID(), sessionId, kind: 'agent', name: input.name.trim(), instructions: input.instructions, webFetch: input.webFetch, color: colors[agents.length], model: DEFAULT_MODEL, effort: DEFAULT_EFFORT, status: session.status === 'paused' ? 'paused' : 'idle', threadId: null, tokensUsed: null, groupCursor: 0, ...(this.paperProgress(sessionId).total ? { paperReview: true } : {}) };
+      this.db.prepare('INSERT INTO participants(session_id,id,data) VALUES(?,?,?)').run(sessionId, agent.id, JSON.stringify(agent));
+      this.event(sessionId, 'participant.joined', agent);
+      // A durable human roster announcement wakes idle sessions and informs peers.
+      this.sendMessage(sessionId, humanId, { body: `Added ${agent.name} to the experiment. Their task: ${agent.instructions}`, requestId: `add-agent:${agent.id}` });
+      return agent;
     });
   }
 
@@ -158,6 +199,13 @@ export class Store extends EventEmitter {
     });
   }
 
+  renameSession(id: string, humanId: string, title: string): Session {
+    if (this.getParticipant(id, humanId).kind !== 'human') throw new StoreError('Only joined humans can rename experiments', 403);
+    title = title.trim();
+    if (!title || Array.from(title).length > 160) throw new StoreError('Experiment name must be 1–160 characters');
+    return this.updateSession(id, { title });
+  }
+
   getParticipant(sessionId: string, id: string): Participant {
     const participant = decode<Participant>(this.db.prepare('SELECT data FROM participants WHERE session_id=? AND id=?').get(sessionId, id));
     if (!participant) throw new StoreError('Participant does not belong to this session', 403);
@@ -182,7 +230,53 @@ export class Store extends EventEmitter {
       session, participants: records<Participant>('participants'), conversations: records<Conversation>('conversations'),
       messages: records<Message>('messages'), deliveries: records<Delivery>('deliveries'), activities: records<Activity>('activities'),
       rounds: records<Round>('rounds'), eventSeq: row.sequence,
+      ...(this.paperProgress(sessionId).total ? { paperProgress: this.paperProgress(sessionId) } : {}),
     };
+  }
+
+  paperProgress(sessionId: string): PaperProgress {
+    const progress: PaperProgress = { total: 0, pending: 0, reviewed: 0, unavailable: 0 };
+    const rows = this.db.prepare('SELECT status,COUNT(*) AS count FROM papers WHERE session_id=? GROUP BY status').all(sessionId) as Array<{ status: Paper['status']; count: number }>;
+    for (const row of rows) { progress[row.status] = row.count; progress.total += row.count; }
+    return progress;
+  }
+
+  readPapers(sessionId: string, options: { after?: number; limit?: number; status?: Paper['status']; reviewerId?: string } = {}) {
+    this.getSession(sessionId);
+    const after = options.after ?? 0; const limit = options.limit ?? 5;
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new StoreError('Invalid paper page');
+    const clauses = ['session_id=?', 'number>?']; const args: Array<string | number> = [sessionId, after];
+    if (options.status) { clauses.push('status=?'); args.push(options.status); }
+    if (options.reviewerId) { clauses.push('reviewer_id=?'); args.push(options.reviewerId); }
+    const values = this.db.prepare(`SELECT data FROM papers WHERE ${clauses.join(' AND ')} ORDER BY number LIMIT ?`).all(...args, limit + 1).map(row => decode<Paper>(row)!);
+    const papers = values.slice(0, limit);
+    return { papers, hasMore: values.length > limit, nextNumber: papers.at(-1)?.number ?? after, progress: this.paperProgress(sessionId) };
+  }
+
+  recordPaperReview(sessionId: string, agentId: string, number: number, status: 'reviewed' | 'unavailable', review: string, file?: { expectedRevision: string | null }) {
+    return this.transaction(() => {
+      const agent = this.getParticipant(sessionId, agentId);
+      const paper = decode<Paper>(this.db.prepare('SELECT data FROM papers WHERE session_id=? AND number=?').get(sessionId, number));
+      if (!paper || agent.kind !== 'agent' || paper.reviewerId !== agentId) throw new StoreError('Only the assigned reviewer can record this paper review', 403);
+      if (!['reviewed', 'unavailable'].includes(status) || !review.trim() || Buffer.byteLength(review) > 200000) throw new StoreError('A review must contain text and fit within 200 KB');
+      if (!file && paper.status === status && paper.review === review.trim()) return paper;
+      paper.status = status; paper.review = review.trim();
+      this.db.prepare('UPDATE papers SET status=?,data=? WHERE session_id=? AND number=?').run(status, JSON.stringify(paper), sessionId, number);
+      if (this.dataDir) {
+        const root = experimentDirectory(this.dataDir, sessionId);
+        const path = safePath(root, `reviews/${String(number).padStart(4, '0')}.md`);
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        if (file) writeSharedFile(root, `reviews/${String(number).padStart(4, '0')}.md`, review, file.expectedRevision);
+        else writeFileSync(path, `# ${paper.number}. ${paper.title}\n\nSource: ${paper.url}\nReviewer: ${agent.name}\nStatus: ${status}\n\n${paper.review}\n`, { mode: 0o600 });
+      }
+      this.event(sessionId, 'paper.reviewed', { number, reviewerId: agentId, status });
+      return paper;
+    });
+  }
+
+  exportPapers(sessionId: string): Paper[] {
+    this.getSession(sessionId);
+    return this.db.prepare('SELECT data FROM papers WHERE session_id=? ORDER BY number').all(sessionId).map(row => decode<Paper>(row)!);
   }
 
   sendMessage(sessionId: string, senderId: string, input: SendMessageInput): Message {

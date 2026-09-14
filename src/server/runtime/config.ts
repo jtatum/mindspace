@@ -2,6 +2,7 @@ import { access, chmod, lstat, mkdir, readlink, symlink } from 'node:fs/promises
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { experimentDirectory } from '../experiment-files.js';
 
 /** The bundled catalog also forces tools, independently of feature flags. */
 export const TERRA_CATALOG = fileURLToPath(new URL('./terra-model.json', import.meta.url));
@@ -55,12 +56,12 @@ async function privateDirectory(path: string) {
 export async function prepareRuntime(
   agentId: string,
   dataDir: string,
-  { probeBaseUrl }: { probeBaseUrl?: string } = {},
+  { probeBaseUrl, sessionId }: { probeBaseUrl?: string; sessionId?: string } = {},
 ): Promise<{ args: string[]; env: NodeJS.ProcessEnv; cwd: string }> {
   if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) throw new Error('Invalid runtime agent identifier');
   const runtimeRoot = resolve(dataDir, 'runtime', agentId);
   const runtimeHome = join(runtimeRoot, 'codex-home');
-  const cwd = join(runtimeRoot, 'workspace');
+  const cwd = sessionId ? experimentDirectory(dataDir, sessionId) : join(runtimeRoot, 'workspace');
   await privateDirectory(dirname(runtimeRoot));
   await privateDirectory(runtimeRoot);
   await privateDirectory(runtimeHome);

@@ -103,3 +103,13 @@ The request body cap is now 2 MiB, covering maximum session fields even when sup
 - Browser identities support local experiments. External authenticated access, containers, Kubernetes deployment, and multiple scheduler owners remain future work. The model picker also remains future work.
 
 Use [the local runbook](local-development.md) to run the application and [the implementation status](implementation-plan.md) to track remaining items.
+
+## AI corpus and shared-directory update
+
+Added a 2,000-paper AI preset, three identical reviewers with durable assignments, per-paper review storage/export, shared experiment files with revision checks, PDF caching/text extraction and a resumable bulk downloader. Joined humans can add up to two agents with custom tasks after creation. Freeform setup remains available.
+
+A live import collected 2,000 distinct arXiv links. All 2,000 PDFs (6.54 GiB) and extracted texts were prepared in the ignored corpus directory, with no extraction truncation. Hosted-manifest loading and a 39-page PDF download/extraction were verified from an empty cache. The corpus, local environment file, and experiment database are excluded from the repository.
+
+The production build and 112 automated tests passed, including the credential-free Codex tool probe, shared workspace/context isolation, runtime dispatch of every advertised paper tool, review-file persistence/ownership/revision checks, file-list pagination, rename authorization, and unlimited scheduling with manual pause/resume. Browser checks covered the existing-experiment rename controls and unlimited settings. A reported live tool denial was traced to the runtime handler omitting the paper-tool capability flag; the handler now uses the same catalog as thread setup. These checks do not claim a completed model review of the full corpus.
+
+Reviewers now save Markdown files under reviews/ and update the durable queue through the shared-file tool. New runs have no automatic limits; zero disables each scheduler budget while positive values remain supported for API clients. Existing local experiments were updated to unlimited settings without changing their paused state. Renaming is available for saved experiments from the sidebar and heading.

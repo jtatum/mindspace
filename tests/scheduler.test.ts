@@ -3,7 +3,25 @@ import test from 'node:test';
 import { Scheduler, type SchedulerClock } from '../src/server/scheduler.js';
 import { Store } from '../src/server/store.js';
 import type { AgentRuntime, RuntimeHooks, RuntimeInput, RuntimeTurnResult } from '../src/server/runtime/types.js';
-import type { Participant, Settings } from '../src/shared/types.js';
+import { DEFAULT_SETTINGS, type Participant, type Settings } from '../src/shared/types.js';
+
+test('unlimited runs exceed former budgets and deadlines but still obey manual pause and resume', async () => {
+  const ctx = setup(DEFAULT_SETTINGS);
+  try {
+    ctx.store.updateSession(ctx.sessionId, { roundNumber: 10001, turnCount: 100001 });
+    await ctx.start();
+    ctx.calls[0].runtime.hooks.onUsage(200000001);
+    await ctx.clock.advance(100 * 24 * 60 * 60 * 1000);
+    assert.equal(ctx.state().session.status, 'running');
+    assert.equal(ctx.calls[0].runtime.interrupts, 0);
+    await ctx.scheduler.control(ctx.sessionId, 'pause'); await flush();
+    assert.equal(ctx.state().session.status, 'paused');
+    assert.equal(ctx.calls[0].runtime.interrupts, 1);
+    await ctx.scheduler.control(ctx.sessionId, 'resume'); await flush();
+    assert.equal(ctx.state().session.status, 'running');
+    assert.equal(ctx.calls.length, 2);
+  } finally { await ctx.close(); }
+});
 
 async function flush() { for (let i = 0; i < 30; i++) await Promise.resolve(); }
 async function until(predicate: () => boolean, explanation: string) {

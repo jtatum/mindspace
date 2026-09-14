@@ -28,11 +28,11 @@ Open [http://127.0.0.1:3001](http://127.0.0.1:3001). `npm start` serves an exist
 
 1. Enter a human display name. The browser keeps its identity across refreshes; a different browser profile gets a separate human identity.
 2. Create an experiment, provide its shared task, and choose three to five named agents with individual instructions. The example task supplies a small fictional paper-classification exercise.
-3. Choose each agent's public web-fetch permission and the round delay, turn deadline, round/turn/token budgets, and elapsed session limit. These settings are fixed for the experiment.
-4. Start the initially paused experiment. Agents read the latest group state in sequential opportunities. The first speaker rotates between rounds; an all-pass quiet round rests until new work arrives.
+3. Choose each agent's public web-fetch permission and the delay between rounds. New experiments have no turn deadline or round, turn, token, or elapsed-time cap. Positive limits remain supported for older API clients; zero disables a limit.
+4. Rename an experiment using the pencil beside its title or beside any saved experiment in the sidebar; the change appears in the sidebar and other open views. Start the initially paused experiment. Agents read the latest group state in sequential opportunities. The first speaker rotates between rounds; an all-pass quiet round rests until new work arrives.
 5. Open an agent's tab to inspect progress, tool arguments/results, and available reasoning summaries. Send a message from the inspector to steer that agent through your own DM conversation.
 6. Open any DM pair to observe its discussion. Every human can inspect every chat; a human can send only as themselves, and cannot post as a participant in an agent-to-agent DM.
-7. Pause the entire experiment or an individual agent when needed. Messages sent while paused remain saved and wait for resume. Export the experiment from the toolbar to save its observation record as JSON.
+7. Pause the entire experiment or an individual agent when needed. Pause requests interruption of active model turns, cancels upcoming rounds, and rejects new agent tool calls. A file write or download already in progress may finish; completed work is not rolled back. Resume continues with saved context and pending work, starting a new turn rather than continuing the interrupted generation. Messages sent while paused remain saved and wait for resume. Export the experiment from the toolbar to save its observation record as JSON.
 
 One active turn is permitted per agent. DMs can wake an idle agent or steer its current turn while another agent has the group opportunity. Ordinary model responses remain in activity; only explicit chat-tool calls publish messages.
 
@@ -40,10 +40,13 @@ One active turn is permitted per agent. DMs can wake an idle agent or steer its 
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
+| `MINDSPACE_PAPERS_BASE_URL` | Unset | Hosted corpus directory containing `manifest.csv` and `papers/0001.pdf` through `papers/2000.pdf`. |
 | `MINDSPACE_DATA_DIR` | `.mindspace`, relative to the working directory | SQLite and persistent per-agent Codex runtime state. |
 | `MINDSPACE_CODEX_BIN` | `codex` | Executable used for version checks and App Server processes. |
 | `MINDSPACE_AUTH_FILE` | `~/.codex/auth.json` | Existing Codex login file used by agent runtime homes. |
 | `PORT` | `3001` | Backend HTTP port; binding stays `127.0.0.1`. |
+
+The dev server, `npm start`, and `papers:download` load an optional `.env` in the project root; exported environment variables take precedence. Copy `.env.example` to `.env` to configure a paper host, then restart the server. This is a backend setting.
 
 The Vite development proxy currently targets port 3001. Keep that backend port when using `npm run dev`; using a different `PORT` requires updating the proxy in `vite.config.ts`. The built application can use a different backend port without a proxy.
 
@@ -80,3 +83,21 @@ If the UI is unavailable, confirm that both dev processes started or that `dist/
 ## Deployment scope
 
 This version is a loopback development service with local browser identities. It has no shared-cluster login system, scheduler ownership leases, container image, or Kubernetes manifests. Run a single backend against its data directory. Model pickers, editable configuration history, and Kubernetes packaging remain in [the backlog](implementation-plan.md).
+
+## AI paper preset and shared files
+
+The New experiment dialog offers an AI paper review preset alongside Freeform. It collects 2,000 distinct arXiv papers matching “artificial intelligence,” sorted by newest announcement, and starts three identical reviewers with fixed assignments of 667, 667 and 666 papers. When `MINDSPACE_PAPERS_BASE_URL` is set, the preset loads the fixed 2,000-paper `manifest.csv` from that directory. It checks numbering, original arXiv URLs, and PDF/text paths; an unavailable or invalid manifest fails the import instead of substituting a different corpus. Without a host, a prepared `.mindspace/corpora/ai-2000.json` fixture is reused when present. Otherwise the importer collects bounded public search pages with pacing; upstream failure creates no partial experiment. The public search path is used because the metadata API returned rate-limit responses during validation.
+
+Every experiment now has a shared working directory at `.mindspace/experiments/<session-id>/shared/`. Agents retain independent Codex homes and contexts but use the same working directory. Scoped file tools allow listing, paged text reads, and writes with revision checks to prevent overwriting unseen peer edits. The UI’s Shared files button shows its absolute path and files. The imported `papers.csv` and `papers.jsonl` are read-only to agents. Reviewers read the extracted paper text with `read_shared_file` and save Markdown reviews with `write_shared_file` at `reviews/NNNN.md`. The file is saved exactly as written and the same transaction updates the paper queue; only the assigned reviewer can change that numbered review. Revision checks protect against stale edits. Other agents can read the reviews and write shared notes or synthesis files. `record_paper_review` remains available, including for unavailable sources. File listings accept a directory path and paging offset, so the full corpus and review collection are accessible.
+
+The paper tools expose bounded pages and enforce review ownership. `cache_paper` saves a PDF under `papers/0001.pdf`, extracts text to `papers/0001.txt`, and records extraction metadata beside it. Existing files are reused. Missing PDFs come from `MINDSPACE_PAPERS_BASE_URL/papers/NNNN.pdf` when configured, with the manifest checked against the saved paper before downloading. Original arXiv URLs remain citations. Downloads are serialized and paced, capped at 500 MB per PDF from the configured host (to accommodate the prepared corpus’s larger files) or 50 MB from arXiv when no host is configured. Cached PDFs and extracted text continue to be reused; the host only needs to supply the manifest and PDFs. Text extraction stops at 300 pages or two million characters and reports truncation. Agents must distinguish sections actually read, missing sources, and extraction limitations. A downloaded PDF can still be useful when text extraction fails.
+
+To prepare the whole corpus before starting agents, keep the experiment paused and run:
+
+```sh
+npm run papers:download -- <session-id>
+```
+
+The command saves `download-status.json`, retries transient failures with delays, and preserves completed PDFs. Rerunning resumes from existing files. Avoid running multiple bulk workers for the same corpus, or bulk downloading while agents are fetching papers. Serve only the experiment’s `shared/` directory when hosting the files locally; it contains no Codex login material. `.mindspace/` remains ignored by Git. No local hosting server is started automatically.
+
+The initial three reviewers process small batches over many rounds, with no automatic run limits. Humans can pause at any time; an all-pass round rests until new work arrives. Add agent in the sidebar lets a joined human add up to two specialists with distinct tasks, including during a run; they enter the next round and can inspect the saved reviews and shared files. Existing assignments do not change. Paused experiments remain paused.
