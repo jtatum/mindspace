@@ -13,6 +13,7 @@ test('completed bulk corpora publish a hosting manifest, fixed list and verified
   const data = mkdtempSync(join(tmpdir(), 'mindspace-publish-corpus-'));
   const root = experimentDirectory(data, 'source');
   const papers = Array.from({ length: 2000 }, (_, i) => ({ number: i + 1, title: `Paper ${i + 1}, "AI"\nresearch`, url: `https://arxiv.org/abs/2609.${String(i + 1).padStart(5, '0')}` }));
+  papers[0].url = 'https://arxiv.org/abs/hep-th/9901001';
   mkdirSync(join(root, 'papers'), { recursive: true });
   writeFileSync(join(root, 'papers.jsonl'), papers.map(p => JSON.stringify(p)).join('\n'));
   try {

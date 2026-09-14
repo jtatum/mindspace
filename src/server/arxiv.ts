@@ -47,8 +47,8 @@ Work in batches over many rounds. Finish each turn after useful progress. Once y
 export interface ArxivCorpus { input: CreateSessionInput; papers: PaperLink[] }
 export function isPreparedPaperList(value: unknown): value is PaperLink[] {
   if (!Array.isArray(value) || value.length !== PAPER_COUNT || !value.every(p =>
-    p && typeof p.title === 'string' && p.title.length <= 2000 && typeof p.url === 'string' &&
-    /^https:\/\/arxiv\.org\/abs\/\d{4}\.\d{4,5}(v\d+)?$/.test(p.url))) return false;
+    p && typeof p.title === 'string' && p.title.trim() && p.title.length <= 2000 && typeof p.url === 'string' &&
+    /^https:\/\/arxiv\.org\/abs\/(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d+)?)$/.test(p.url))) return false;
   return new Set(value.map(p => p.url.replace(/v\d+$/, ''))).size === PAPER_COUNT;
 }
 let cached: { corpus: ArxivCorpus; expires: number } | undefined;

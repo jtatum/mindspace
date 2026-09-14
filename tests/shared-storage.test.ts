@@ -4,6 +4,8 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkExperimentStorage, checkSharedWriteStorage } from '../src/server/shared-storage.js';
+import { Store } from '../src/server/store.js';
+import { paperReviewExperiment } from '../src/server/arxiv.js';
 import { writeSharedFile } from '../src/server/experiment-files.js';
 
 test('experiment admission reserves database and corpus copies above the volume free-space floor', () => {
@@ -39,4 +41,19 @@ test('shared writes enforce the configured aggregate budget before creating file
     assert.throws(() => writeSharedFile(root, 'new/three.md', '1', null), /storage limit/);
     assert.equal(existsSync(join(root, 'new')), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('initial corpus files must fit the shared quota or creation rolls back without files', t => {
+  const root = mkdtempSync(join(tmpdir(), 'mindspace-create-quota-'));
+  const store = new Store(join(root, 'mindspace.sqlite'));
+  const previous = process.env.MINDSPACE_SHARED_MAX_BYTES;
+  t.after(() => { if (previous === undefined) delete process.env.MINDSPACE_SHARED_MAX_BYTES; else process.env.MINDSPACE_SHARED_MAX_BYTES = previous; });
+  process.env.MINDSPACE_SHARED_MAX_BYTES = '20000';
+  try {
+    const papers = Array.from({ length: 2000 }, (_, i) => ({ title: `Paper ${i + 1}`, url: `https://arxiv.org/abs/2609.${String(i + 1).padStart(5, '0')}` }));
+    assert.throws(() => store.createSession(paperReviewExperiment('2026-09-14'), store.createIdentity('Human'), 'simulation', papers), /storage limit/);
+    assert.equal(store.listSessions().length, 0);
+    assert.equal(existsSync(join(root, 'experiments')), false);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

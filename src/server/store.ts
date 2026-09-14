@@ -139,14 +139,18 @@ export class Store extends EventEmitter {
       this.sendMessage(session.id, human.id, { body: session.task, requestId: 'initial-task' });
       if (this.dataDir) {
         const directory = experimentDirectory(this.dataDir, session.id);
-        mkdirSync(directory, { recursive: true, mode: 0o700 });
-        writeFileSync(join(directory, 'README.md'), `# ${session.title}\n\n${session.task}\n\nAll agents share this directory. Use separate notes files or coordinate shared edits.\n`, { mode: 0o600 });
+        const files = [{ name: 'README.md', text: `# ${session.title}\n\n${session.task}\n\nAll agents share this directory. Use separate notes files or coordinate shared edits.\n` }];
         if (papers) {
           const records = this.exportPapers(session.id);
-          writeFileSync(join(directory, 'papers.jsonl'), records.map(({ number, title, url, reviewerId }) => JSON.stringify({ number, title, url, reviewerId })).join('\n') + '\n', { mode: 0o600 });
+          files.push({ name: 'papers.jsonl', text: records.map(({ number, title, url, reviewerId }) => JSON.stringify({ number, title, url, reviewerId })).join('\n') + '\n' });
           const csv = (value: string) => `"${value.replaceAll('"', '""')}"`;
-          writeFileSync(join(directory, 'papers.csv'), 'number,title,url,reviewer_id\n' + records.map(p => [p.number, csv(p.title), csv(p.url), csv(p.reviewerId)].join(',')).join('\n') + '\n', { mode: 0o600 });
+          files.push({ name: 'papers.csv', text: 'number,title,url,reviewer_id\n' + records.map(p => [p.number, csv(p.title), csv(p.url), csv(p.reviewerId)].join(',')).join('\n') + '\n' });
         }
+        // Validate the combined initial files before any filesystem mutation;
+        // a rejection rolls back the session and paper rows in this transaction.
+        checkSharedWriteStorage(directory, join(directory, 'README.md'), files.reduce((bytes, file) => bytes + Buffer.byteLength(file.text), 0));
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        for (const file of files) writeFileSync(join(directory, file.name), file.text, { mode: 0o600 });
       }
       return this.snapshot(session.id);
     });
