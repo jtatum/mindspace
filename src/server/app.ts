@@ -143,14 +143,14 @@ export async function buildApp({ store, scheduler, health, webRoot, arxivExperim
   });
   app.get('/api/sessions/:id/files', async (request, reply) => {
     const id = sessionId(request); store.getSession(id);
-    const query = z.object({ path: z.string().min(1).max(300).optional(), offset: z.coerce.number().int().min(0).default(0) }).parse(request.query);
+    const query = z.object({ path: z.string().min(1).max(300).optional(), directory: z.string().min(1).max(300).optional(), offset: z.coerce.number().int().min(0).default(0) }).refine(value => !(value.path && value.directory), 'Choose a file or directory, not both').parse(request.query);
     const directory = experimentDirectory(dataDir, id);
     try {
       if (query.path?.endsWith('.pdf')) {
         reply.type('application/pdf').header('Content-Disposition', 'inline').header('X-Content-Type-Options', 'nosniff');
         return reply.send(createReadStream(safePath(directory, query.path)));
       }
-      return query.path ? readSharedFile(directory, query.path, query.offset) : { directory, ...listSharedFiles(directory) };
+      return query.path ? readSharedFile(directory, query.path, query.offset) : { directory, ...listSharedFiles(directory, { path: query.directory, offset: query.offset }) };
     }
     catch (error) { throw new StoreError(error instanceof Error ? error.message : 'Could not read shared files'); }
   });

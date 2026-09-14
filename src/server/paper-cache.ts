@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { experimentDirectory, listSharedFiles, safePath } from './experiment-files.js';
 import type { Paper } from '../shared/types.js';
 import { hostedPdfUrl, papersBaseUrl } from './paper-source.js';
+import { MAX_PAPER_TEXT_CHARACTERS } from './file-limits.js';
 const run = promisify(execFile);
 let queue: Promise<unknown> = Promise.resolve();
 let nextFetchAt = 0;
@@ -76,7 +77,7 @@ async function cache(dataDir: string, sessionId: string, paper: Pick<Paper, 'num
       extractedCharacters += pageText.trim().length;
       text += `\n\n--- Page ${number} ---\n${pageText}`;
       page.cleanup();
-      if (text.length > 2000000) { text = text.slice(0, 2000000); truncated = true; break; }
+      if (text.length > MAX_PAPER_TEXT_CHARACTERS) { text = text.slice(0, MAX_PAPER_TEXT_CHARACTERS); truncated = true; break; }
     }
     if (!extractedCharacters) throw new Error('PDF saved, but no readable text was extracted. It may require OCR.');
     const result = { pdfPath, textPath, pages, textTruncated: truncated };

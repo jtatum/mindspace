@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
+import { MAX_SHARED_TEXT_BYTES } from './file-limits.js';
 
 export function experimentDirectory(dataDir: string, sessionId: string) {
   if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw new Error('Invalid experiment identifier');
@@ -45,7 +46,7 @@ export function listSharedFiles(root: string, options: { path?: string; offset?:
 export function readSharedFile(root: string, name: string, offset = 0) {
   const path = safePath(root, name);
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid text offset');
-  if (statSync(path).size > 5_000_000) throw new Error('File exceeds the 5 MB read limit');
+  if (statSync(path).size > MAX_SHARED_TEXT_BYTES) throw new Error(`File exceeds the ${MAX_SHARED_TEXT_BYTES / 1_000_000} MB read limit`);
   const text = readFileSync(path, 'utf8');
   return { path: name, text: text.slice(offset, offset + 20000), nextOffset: Math.min(offset + 20000, text.length), hasMore: offset + 20000 < text.length, revision: revision(text) };
 }

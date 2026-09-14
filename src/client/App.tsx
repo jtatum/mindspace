@@ -3,6 +3,7 @@ import { ArrowDown, ArrowDownToLine, ArrowRight, ArrowUp, Bot, Check, ChevronDow
 import { DEFAULT_SETTINGS, type Activity, type Conversation, type CreateSessionInput, type Identity, type Message, type Participant, type RuntimeHealth, type Session, type Snapshot } from '../shared/types';
 import { api, downloadSession, readIdentity, saveIdentity, withIdentityRecovery } from './api';
 import { subscribeSessionEvents } from './session-events';
+import { RunLimits } from './RunLimits';
 
 const agentColors = ['#d5e5a7', '#aecfcb', '#d9bd9f', '#c1b5df', '#a6c3db'];
 const suggestedAgents = [
@@ -321,7 +322,7 @@ function CreateDialog({ onClose, onSubmit, mode, getImportProgress }: { onClose:
 }
 function SettingsDialog({ snapshot, onClose }: { snapshot: Snapshot; onClose: () => void }) {
   const { session } = snapshot; const { settings } = session;
-  return <Modal title="Experiment settings" onClose={onClose}><div className="settings-dialog"><p className="modal-description">Pause or resume whenever you like. You can add agents with new tasks from the sidebar.</p><div className="settings-title">{session.title}<Status status={session.status} /></div><dl><div><dt>Runtime</dt><dd>{session.runtimeMode === 'simulation' ? 'Simulation (scripted)' : 'Codex App Server'}</dd></div><div><dt>Agent model</dt><dd>gpt-5.6-terra · high</dd></div><div><dt>Between rounds</dt><dd>{settings.roundDelayMs / 1000} seconds</dd></div><div><dt>Rounds started</dt><dd>{session.roundNumber}</dd></div><div><dt>Turns started</dt><dd>{session.turnCount}</dd></div><div><dt>Run limits</dt><dd>None</dd></div><div><dt>Created</dt><dd>{new Date(session.createdAt).toLocaleString()}</dd></div></dl><p className="settings-note"><Eye size={15} />All human participants can inspect every chat and agent activity stream.</p><button className="secondary-button full-width" onClick={onClose}>Back to the experiment</button></div></Modal>;
+  return <Modal title="Experiment settings" onClose={onClose}><div className="settings-dialog"><p className="modal-description">Pause or resume whenever you like. You can add agents with new tasks from the sidebar.</p><div className="settings-title">{session.title}<Status status={session.status} /></div><dl><div><dt>Runtime</dt><dd>{session.runtimeMode === 'simulation' ? 'Simulation (scripted)' : 'Codex App Server'}</dd></div><div><dt>Agent model</dt><dd>gpt-5.6-terra · high</dd></div><div><dt>Between rounds</dt><dd>{settings.roundDelayMs / 1000} seconds</dd></div><div><dt>Rounds started</dt><dd>{session.roundNumber}</dd></div><div><dt>Turns started</dt><dd>{session.turnCount}</dd></div><RunLimits settings={settings} /><div><dt>Created</dt><dd>{new Date(session.createdAt).toLocaleString()}</dd></div></dl><p className="settings-note"><Eye size={15} />All human participants can inspect every chat and agent activity stream.</p><button className="secondary-button full-width" onClick={onClose}>Back to the experiment</button></div></Modal>;
 }
 
 function AddAgentDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (input: { name: string; instructions: string; webFetch: boolean }) => Promise<void> }) {
@@ -330,10 +331,38 @@ function AddAgentDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: 
   return <Modal title="Add a mind to the experiment." onClose={busy ? undefined : onClose}><form className="create-form" onSubmit={async event => { event.preventDefault(); setBusy(true); setError(''); try { await onSubmit({ name: name.trim(), instructions: instructions.trim(), webFetch }); } catch (failure) { setError(errorText(failure)); setBusy(false); } }}><p className="modal-description">Give this agent its own task. It joins the next round with access to the conversation, paper reviews and shared directory.</p><label>Name<input value={name} onChange={e => setName(e.target.value)} maxLength={80} required placeholder="e.g. Owl" /></label><label>Task<textarea value={instructions} onChange={e => setInstructions(e.target.value)} rows={5} maxLength={16000} required placeholder="e.g. Find recurring themes in the reviews and maintain a taxonomy in the shared directory." /></label><label className="checkbox-label"><input type="checkbox" checked={webFetch} onChange={e => setWebFetch(e.target.checked)} /> Allow public web fetch</label>{error && <p role="alert" className="form-error">{error}</p>}<div className="create-footer"><span>Terra 5.6 · High reasoning</span><button className="primary-button" disabled={busy || !name.trim() || !instructions.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : 'Add agent'}</button></div></form></Modal>;
 }
 function SharedFilesDialog({ onClose, load, fileUrl }: { onClose: () => void; load: (query?: string) => Promise<any>; fileUrl: string }) {
-  const [listing, setListing] = useState<{ directory: string; files: Array<{ path: string; bytes: number }> }>();
+  type Listing = { directory: string; directories: string[]; files: Array<{ path: string; bytes: number }>; hasMore: boolean; nextOffset: number };
+  const [listing, setListing] = useState<Listing>();
+  const [folder, setFolder] = useState('');
   const [file, setFile] = useState<{ path: string; text: string; nextOffset: number; hasMore: boolean }>();
-  const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
-  useEffect(() => { let active = true; void load().then(value => { if (active) setListing(value); }).catch(failure => { if (active) setError(errorText(failure)); }); return () => { active = false; }; }, []);
+  const [error, setError] = useState(''); const [busy, setBusy] = useState(true);
+  useEffect(() => { let active = true; void load().then(value => { if (active) setListing(value); }).catch(failure => { if (active) setError(errorText(failure)); }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, []);
+  async function browse(directory: string, offset = 0) {
+    setBusy(true); setError('');
+    try {
+      const query = new URLSearchParams({ offset: String(offset) });
+      if (directory) query.set('directory', directory);
+      const page: Listing = await load(`?${query}`);
+      setListing(previous => offset && previous ? { ...page, files: [...new Map([...previous.files, ...page.files].map(item => [item.path, item])).values()] } : page);
+      setFolder(directory);
+      if (!offset) setFile(undefined);
+    } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
+  }
   async function open(path: string, offset = 0) { setBusy(true); setError(''); try { setFile(await load(`?path=${encodeURIComponent(path)}&offset=${offset}`)); } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); } }
-  return <Modal wide title="Shared experiment files" onClose={onClose}><div className="create-form"><p className="modal-description">Every agent works in this directory. Files remain available after a restart.</p>{listing && <><code className="shared-directory">{listing.directory}</code><div className="shared-file-list">{listing.files.map(item => item.path.endsWith('.pdf') ? <a className="secondary-button" key={item.path} href={`${fileUrl}?path=${encodeURIComponent(item.path)}`} target="_blank" rel="noreferrer">{item.path} <small>{formatNumber(item.bytes)} bytes</small></a> : <button className="secondary-button" key={item.path} disabled={busy} onClick={() => void open(item.path)}>{item.path} <small>{formatNumber(item.bytes)} bytes</small></button>)}</div></>}{error && <p className="form-error" role="alert">{error}</p>}{file && <><h3>{file.path}</h3><pre className="shared-file-content">{file.text}</pre>{file.hasMore && <button className="secondary-button" disabled={busy} onClick={() => void open(file.path, file.nextOffset)}>Next page <ArrowRight size={12} /></button>}</>}</div></Modal>;
+  return <Modal wide title="Shared experiment files" onClose={onClose}><div className="create-form">
+    <p className="modal-description">Every agent works in this directory. Files remain available after a restart.</p>
+    {listing && <><code className="shared-directory">{listing.directory}{folder ? `/${folder}` : ''}</code>
+      <nav className="shared-file-folders" aria-label="Workspace folders">
+        {folder && <button className="secondary-button" disabled={busy} onClick={() => void browse(folder.split('/').slice(0, -1).join('/'))}>Up one folder</button>}
+        {listing.directories.map(directory => <button className="secondary-button" key={directory} disabled={busy} onClick={() => void browse(directory)}>{directory}/</button>)}
+        <button className="secondary-button" disabled={busy} onClick={() => void browse(folder)}>Refresh files</button>
+      </nav>
+      <div className="shared-file-list">{listing.files.map(item => item.path.endsWith('.pdf') ? <a className="secondary-button" key={item.path} href={`${fileUrl}?path=${encodeURIComponent(item.path)}`} target="_blank" rel="noreferrer">{item.path} <small>{formatNumber(item.bytes)} bytes</small></a> : <button className="secondary-button" key={item.path} disabled={busy} onClick={() => void open(item.path)}>{item.path} <small>{formatNumber(item.bytes)} bytes</small></button>)}</div>
+      {listing.hasMore && <button className="secondary-button" disabled={busy} onClick={() => void browse(folder, listing.nextOffset)}>Load more files <ArrowDown size={12} /></button>}
+      {!listing.files.length && <p>No files in this folder yet.</p>}
+    </>}
+    {busy && <p role="status">Loading…</p>}
+    {error && <p className="form-error" role="alert">{error}</p>}
+    {file && <><h3>{file.path}</h3><pre className="shared-file-content">{file.text}</pre>{file.hasMore && <button className="secondary-button" disabled={busy} onClick={() => void open(file.path, file.nextOffset)}>Next page <ArrowRight size={12} /></button>}</>}
+  </div></Modal>;
 }

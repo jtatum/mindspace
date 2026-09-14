@@ -23,3 +23,5 @@
 .session-row.selected .session-link { color: #d8e4cb; }
 .session-row .session-rename { flex: 0 0 28px; width: 28px; height: 30px; margin-right: 4px; color: #aab39f; }
 .session-row .session-rename:hover { color: var(--accent); background: #303b27; }
+
+.shared-file-folders { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
