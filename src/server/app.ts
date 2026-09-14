@@ -1,8 +1,12 @@
+import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { z } from 'zod';
 import { Store, StoreError } from './store.js';
 import type { Message, RuntimeHealth, SessionEvent } from '../shared/types.js';
+import { fetchAiExperiment, arxivImportProgress } from './arxiv.js';
+import { experimentDirectory, listSharedFiles, readSharedFile, safePath } from './experiment-files.js';
 
 export type ControlAction = 'start' | 'pause' | 'resume' | 'next-round' | 'pause-agent' | 'resume-agent';
 export interface SchedulerApi {
@@ -15,6 +19,8 @@ interface AppOptions {
   scheduler: SchedulerApi;
   health: RuntimeHealth | (() => RuntimeHealth | Promise<RuntimeHealth>);
   webRoot?: string;
+  arxivExperiment?: typeof fetchAiExperiment;
+  dataDir?: string;
 }
 const identitySchema = z.object({ name: z.string().trim().min(1).max(80) }).strict();
 const createSchema = z.object({
@@ -22,11 +28,11 @@ const createSchema = z.object({
   agents: z.array(z.object({ name: z.string().trim().min(1).max(80), instructions: z.string().max(16000), webFetch: z.boolean().optional() }).strict()).min(3).max(5),
   settings: z.object({
     roundDelayMs: z.number().int().min(0).max(3600000).optional(),
-    turnTimeoutMs: z.number().int().min(50).max(1800000).optional(),
-    maxRounds: z.number().int().min(1).max(10000).optional(),
-    maxTurns: z.number().int().min(1).max(100000).optional(),
-    maxTokens: z.number().int().min(1).max(100000000).optional(),
-    maxDurationMs: z.number().int().min(100).max(604800000).optional(),
+    turnTimeoutMs: z.number().int().min(0).max(1800000).optional(),
+    maxRounds: z.number().int().min(0).max(10000).optional(),
+    maxTurns: z.number().int().min(0).max(100000).optional(),
+    maxTokens: z.number().int().min(0).max(100000000).optional(),
+    maxDurationMs: z.number().int().min(0).max(604800000).optional(),
   }).strict().optional(),
 }).strict();
 const messageSchema = z.object({
@@ -43,7 +49,7 @@ function setIdentityCookie(request: FastifyRequest, reply: FastifyReply, token: 
   reply.header('Cache-Control', 'no-store');
 }
 
-export async function buildApp({ store, scheduler, health, webRoot }: AppOptions) {
+export async function buildApp({ store, scheduler, health, webRoot, arxivExperiment = fetchAiExperiment, dataDir = process.env.MINDSPACE_DATA_DIR || '.mindspace' }: AppOptions) {
   // Maximum session fields hold 120,560 Unicode code points. Escaped surrogate
   // pairs need up to 12 JSON bytes each; 2 MiB also leaves room for JSON metadata.
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
@@ -106,11 +112,49 @@ export async function buildApp({ store, scheduler, health, webRoot }: AppOptions
     return reply.code(201).send(identity);
   });
   app.get('/api/sessions', async () => store.listSessions());
+  app.get('/api/arxiv/progress', async () => arxivImportProgress);
+  app.post('/api/sessions/arxiv', async (request, reply) => {
+    let input;
+    try { input = await arxivExperiment(dataDir); }
+    catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'Could not load arXiv paper links. Please try again.' }); }
+    const snapshot = store.createSession(createSchema.parse(input.input), identities.get(request)!, (await getHealth()).mode, input.papers);
+    return reply.code(201).send(snapshot);
+  });
   app.post('/api/sessions', async (request, reply) => {
     const snapshot = store.createSession(createSchema.parse(request.body), identities.get(request)!, (await getHealth()).mode);
     return reply.code(201).send(snapshot);
   });
   app.post('/api/sessions/:id/join', async request => store.joinSession(sessionId(request), identities.get(request)!));
+  app.patch('/api/sessions/:id', async request => {
+    const id = sessionId(request);
+    const { title } = z.object({ title: z.string().trim().min(1).max(160) }).strict().parse(request.body);
+    store.renameSession(id, identities.get(request)!.id, title);
+    return store.snapshot(id);
+  });
+  app.post('/api/sessions/:id/agents', async (request, reply) => {
+    const id = sessionId(request);
+    store.getParticipant(id, identities.get(request)!.id);
+    const input = z.object({ name: z.string().trim().min(1).max(80), instructions: z.string().trim().min(1).max(16000), webFetch: z.boolean().default(true) }).strict().parse(request.body);
+    store.addAgent(id, input, identities.get(request)!.id);
+    return reply.code(201).send(store.snapshot(id));
+  });
+  app.get('/api/sessions/:id/papers', async request => {
+    const options = z.object({ after: z.coerce.number().int().min(0).default(0), limit: z.coerce.number().int().min(1).max(100).default(50), status: z.enum(['pending', 'reviewed', 'unavailable']).optional() }).parse(request.query);
+    return store.readPapers(sessionId(request), options);
+  });
+  app.get('/api/sessions/:id/files', async (request, reply) => {
+    const id = sessionId(request); store.getSession(id);
+    const query = z.object({ path: z.string().min(1).max(300).optional(), directory: z.string().min(1).max(300).optional(), offset: z.coerce.number().int().min(0).default(0) }).refine(value => !(value.path && value.directory), 'Choose a file or directory, not both').parse(request.query);
+    const directory = experimentDirectory(dataDir, id);
+    try {
+      if (query.path?.endsWith('.pdf')) {
+        reply.type('application/pdf').header('Content-Disposition', 'inline').header('X-Content-Type-Options', 'nosniff');
+        return reply.send(createReadStream(safePath(directory, query.path)));
+      }
+      return query.path ? readSharedFile(directory, query.path, query.offset) : { directory, ...listSharedFiles(directory, { path: query.directory, offset: query.offset }) };
+    }
+    catch (error) { throw new StoreError(error instanceof Error ? error.message : 'Could not read shared files'); }
+  });
   app.get('/api/sessions/:id', async request => store.snapshot(sessionId(request)));
   app.post('/api/sessions/:id/messages', async (request, reply) => {
     const message = store.sendMessage(sessionId(request), identities.get(request)!.id, messageSchema.parse(request.body));
@@ -130,7 +174,8 @@ export async function buildApp({ store, scheduler, health, webRoot }: AppOptions
     const id = sessionId(request);
     reply.header('Content-Disposition', `attachment; filename="mindspace-${id}.json"`);
     reply.header('Cache-Control', 'no-store');
-    return store.snapshot(id);
+    store.getSession(id);
+    return reply.type('application/json').send(Readable.from(store.streamExport(id), { objectMode: false, highWaterMark: 16384 }));
   });
   app.get('/api/sessions/:id/events', async (request, reply) => {
     const id = sessionId(request);

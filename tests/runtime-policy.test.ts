@@ -6,7 +6,30 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { CodexRpc } from '../src/server/runtime/rpc.js';
 import { prepareRuntime, TERRA_CATALOG } from '../src/server/runtime/config.js';
-import { chatTools } from '../src/server/runtime/codex.js';
+import { chatTools, CodexRuntime } from '../src/server/runtime/codex.js';
+import { Store } from '../src/server/store.js';
+
+test('runtime accepts every advertised paper tool and rejects paper tools for general agents', async () => {
+  const store = new Store(':memory:');
+  try {
+    const human = store.createIdentity('Observer');
+    const snapshot = store.createSession({ title: 'Tools', task: 'Review', agents: ['A', 'B', 'C'].map(name => ({ name, instructions: '' })) }, human, 'simulation');
+    const agent = snapshot.participants.find(p => p.kind === 'agent')!;
+    for (const paperReview of [true, false]) {
+      const called: string[] = []; const replies: any[] = [];
+      const runtime = new CodexRuntime({ ...agent, paperReview, webFetch: true }, {
+        onActivity() {}, onUsage() {}, onThread() {}, onTurnStarted() {},
+        onTool: async name => { called.push(name); return { ok: true }; },
+      }, '/unused');
+      (runtime as any).rpc = { send: (reply: any) => replies.push(reply) };
+      for (const tool of chatTools(true, true)) {
+        await (runtime as any).handle({ id: replies.length + 1, method: 'item/tool/call', params: { tool: tool.name, arguments: {}, callId: tool.name } });
+        assert.equal(replies.at(-1).result.success, chatTools(true, paperReview).some(t => t.name === tool.name), tool.name);
+      }
+      assert.deepEqual(called, chatTools(true, paperReview).map(t => t.name));
+    }
+  } finally { store.close(); }
+});
 
 test('Terra requests expose exactly the supplied dynamic tools with isolated configuration', { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mindspace-policy-'));
@@ -36,11 +59,11 @@ test('Terra requests expose exactly the supplied dynamic tools with isolated con
     assert(!(await readdir(settings.env.CODEX_HOME!)).includes('auth.json'));
     rpc = new CodexRpc(settings.args, settings.env, settings.cwd);
     await rpc.initialize();
-    const names = ['send_group_message', 'send_dm', 'read_group_messages', 'web_fetch'];
+    const names = ['send_group_message', 'send_dm', 'read_group_messages', 'web_fetch', 'list_shared_files', 'read_shared_file', 'write_shared_file', 'read_papers', 'record_paper_review', 'cache_paper'];
     const started = await rpc.request('thread/start', {
       model: 'gpt-5.6-terra', cwd: settings.cwd, sandbox: 'read-only', approvalPolicy: 'never',
       ephemeral: true, baseInstructions: 'Mindspace isolated tool catalog probe.',
-      dynamicTools: chatTools(true),
+      dynamicTools: chatTools(true, true),
     });
     await rpc.request('turn/start', { threadId: started.thread.id, effort: 'high', input: [{ type: 'text', text: 'Pass.', text_elements: [] }] });
     const body = await requestBody;
@@ -78,5 +101,17 @@ test('runtime refuses path traversal and non-local test endpoints', async () => 
   try {
     await assert.rejects(prepareRuntime('../outside', directory), /identifier/);
     await assert.rejects(prepareRuntime('probe', directory, { probeBaseUrl: 'https://example.com/v1' }), /loopback/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('experiment agents share a working directory while retaining separate runtime homes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mindspace-shared-policy-'));
+  try {
+    const options = { sessionId: 'shared-experiment', probeBaseUrl: 'http://127.0.0.1:9999/v1' };
+    const a = await prepareRuntime('agent-a', directory, options);
+    const b = await prepareRuntime('agent-b', directory, options);
+    assert.equal(a.cwd, b.cwd);
+    assert.notEqual(a.env.CODEX_HOME, b.env.CODEX_HOME);
+    assert(a.cwd.endsWith('/experiments/shared-experiment/shared'));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

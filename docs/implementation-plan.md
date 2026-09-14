@@ -2,13 +2,15 @@
 
 Status: local application implemented, September 13, 2026. Current evidence is recorded in [the integration report](integration-report.md); startup and recovery instructions are in [the local runbook](local-development.md). Behavior is specified in [the architecture](architecture.md).
 
+The AI paper preset, shared experiment directory, PDF cache/downloader and post-creation Add agent control are now implemented; see the [local runbook](local-development.md#ai-paper-preset-and-shared-files). The full 2,000-PDF download is tracked separately and is not yet certified complete.
+
 Every current agent uses **GPT-5.6 Terra (`gpt-5.6-terra`) with `high` reasoning effort**. Five agents and two independent human identities have exercised the local application. Model choice remains fixed until the later picker milestone.
 
 The original work items and completion criteria below remain useful acceptance targets. The following status table distinguishes implemented work from partial criteria; a working local application does not imply every historical criterion is complete.
 
 ## Current implementation status
 
-The production build passed. The final automated run passed **98/98 tests**, including storage/API integration, controllable scheduler/runtime tests, a credential-free Codex tool-policy probe, and review regressions.
+The production build passed. The final automated run passed **104/104 tests**, including storage/API integration, controllable scheduler/runtime tests, a credential-free Codex tool-policy probe, and review regressions.
 
 | Items | Status | Evidence or remaining detail |
 | --- | --- | --- |

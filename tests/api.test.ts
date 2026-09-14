@@ -6,6 +6,24 @@ import type { CreateSessionInput, Identity, Message, RuntimeHealth, SessionEvent
 
 const input: CreateSessionInput = { title: 'Test experiment', task: 'Classify papers.', agents: ['A', 'B', 'C'].map(name => ({ name, instructions: '' })) };
 const health: RuntimeHealth = { mode: 'simulation', available: true, model: 'gpt-5.6-terra', effort: 'high' };
+
+test('joined humans can rename experiments; observers cannot, and only the title changes', async () => {
+  const ctx = await setup();
+  try {
+    const base = `/api/sessions/${ctx.snapshot.session.id}`;
+    const observer = ctx.store.createIdentity('Observer');
+    assert.equal((await ctx.app.inject({ method: 'PATCH', url: base, payload: { title: 'New' } })).statusCode, 401);
+    assert.equal((await ctx.app.inject({ method: 'PATCH', url: base, headers: { authorization: `Bearer ${observer.token}` }, payload: { title: 'New' } })).statusCode, 403);
+    for (const payload of [{ title: ' ' }, { title: 'x'.repeat(161) }, { title: 'New', task: 'Overwrite' }]) {
+      assert.equal((await ctx.app.inject({ method: 'PATCH', url: base, headers: ctx.headers, payload })).statusCode, 400);
+    }
+    const renamed = await ctx.app.inject({ method: 'PATCH', url: base, headers: ctx.headers, payload: { title: '  AI landscape  ' } });
+    assert.equal(renamed.statusCode, 200);
+    assert.deepEqual(renamed.json<Snapshot>().session, { ...ctx.snapshot.session, title: 'AI landscape' });
+    assert.equal(ctx.store.listSessions()[0].title, 'AI landscape');
+    assert.equal(ctx.store.eventsAfter(ctx.snapshot.session.id, ctx.snapshot.eventSeq).at(-1)?.type, 'session.updated');
+  } finally { await ctx.close(); }
+});
 async function setup() {
   const store = new Store(':memory:');
   const seen: Message[] = [];
