@@ -45,6 +45,12 @@ Work in batches over many rounds. Finish each turn after useful progress. Once y
 }
 
 export interface ArxivCorpus { input: CreateSessionInput; papers: PaperLink[] }
+export function isPreparedPaperList(value: unknown): value is PaperLink[] {
+  if (!Array.isArray(value) || value.length !== PAPER_COUNT || !value.every(p =>
+    p && typeof p.title === 'string' && p.title.length <= 2000 && typeof p.url === 'string' &&
+    /^https:\/\/arxiv\.org\/abs\/\d{4}\.\d{4,5}(v\d+)?$/.test(p.url))) return false;
+  return new Set(value.map(p => p.url.replace(/v\d+$/, ''))).size === PAPER_COUNT;
+}
 let cached: { corpus: ArxivCorpus; expires: number } | undefined;
 let pending: Promise<ArxivCorpus> | undefined;
 let nextRequestAt = 0;
@@ -66,7 +72,7 @@ export async function fetchAiExperiment(dataDir = process.env.MINDSPACE_DATA_DIR
   const savedPath = join(dataDir, 'corpora', 'ai-2000.json');
   try {
     const saved = JSON.parse(await readFile(savedPath, 'utf8')) as ArxivCorpus;
-    if (saved.papers?.length === PAPER_COUNT && new Set(saved.papers.map(p => p.url)).size === PAPER_COUNT && saved.papers.every(p => typeof p.title === 'string' && p.title.length <= 2000 && /^https:\/\/arxiv\.org\/abs\/\d{4}\.\d{4,5}(v\d+)?$/.test(p.url))) {
+    if (isPreparedPaperList(saved.papers)) {
       return { papers: saved.papers, input: paperReviewExperiment((await stat(savedPath)).mtime.toISOString()) };
     }
   } catch { /* No valid local fixture: collect a fresh list. */ }

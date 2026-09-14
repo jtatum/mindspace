@@ -3,12 +3,23 @@ import test from 'node:test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { papersBaseUrl, parseHostedManifest, hostedPdfUrl } from '../src/server/paper-source.js';
-import { fetchAiExperiment } from '../src/server/arxiv.js';
+import { fetchAiExperiment, isPreparedPaperList } from '../src/server/arxiv.js';
 
 const manifest = 'number,title,arxiv_url,pdf_path,text_path\r\n' + Array.from({ length: 2000 }, (_, i) => {
   const stem = String(i + 1).padStart(4, '0');
   return `${i + 1},"AI, paper ""${i + 1}""",https://arxiv.org/abs/2609.${String(i + 1).padStart(5, '0')},papers/${stem}.pdf,papers/${stem}.txt\r\n`;
 }).join('');
+
+test('prepared fixtures require 2,000 distinct arXiv IDs regardless of version suffix', () => {
+  const papers = parseHostedManifest(manifest).map(paper => ({ ...paper, url: `${paper.url}v1` }));
+  assert.equal(isPreparedPaperList(papers), true, 'distinct versioned citations remain valid');
+  const duplicate = papers.map(paper => ({ ...paper }));
+  duplicate[1].url = duplicate[0].url.replace(/v1$/, 'v2');
+  assert.equal(isPreparedPaperList(duplicate), false, 'two versions do not supply two distinct papers');
+  duplicate[1].url = duplicate[0].url.replace(/v1$/, '');
+  assert.equal(isPreparedPaperList(duplicate), false, 'versioned and versionless forms identify the same paper');
+  assert.equal(isPreparedPaperList([...papers.slice(0, -1), { title: 'Malformed', url: null }]), false);
+});
 
 test('paper host normalization preserves directory paths and rejects ambiguous config', () => {
   assert.equal(papersBaseUrl('https://example.org/ai-papers'), 'https://example.org/ai-papers/');
