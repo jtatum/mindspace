@@ -54,6 +54,9 @@ test('reviewer tool callbacks read paper text and save review files with durable
     for (const path of ['Reviews/0001.md', 'reviews/0001.MD', 'REVIEWS/0001.MD']) {
       await assert.rejects(horse('write_shared_file', { path, text: 'Clobber', expected_revision: saved.revision }), /canonical/);
     }
+    for (const path of ['reviews\\0001.md', 'papers\\0001.pdf', 'Papers\\0001.pdf']) {
+      await assert.rejects(horse('write_shared_file', { path, text: 'Clobber', expected_revision: saved.revision }), /forward slashes/);
+    }
     assert.equal(readFileSync(join(root, 'reviews/0001.md'), 'utf8'), review);
     await assert.rejects(fox('write_shared_file', { path: 'reviews/0001.md', text: 'Stale', expected_revision: null }), /changed/);
     assert.equal(store.exportPapers(sessionId)[0].review, review, 'failed file write rolls back the queue change');

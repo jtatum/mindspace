@@ -51,6 +51,7 @@ export function readSharedFile(root: string, name: string, offset = 0) {
   return { path: name, text: text.slice(offset, offset + 20000), nextOffset: Math.min(offset + 20000, text.length), hasMore: offset + 20000 < text.length, revision: revision(text) };
 }
 export function assertSharedWritePath(name: string) {
+  if (name.includes('\\')) throw new Error('Use forward slashes in shared file paths');
   // Apply the same policy on case-sensitive and case-insensitive volumes.
   const folded = name.toLowerCase();
   if (['papers', 'papers.jsonl', 'papers.csv'].includes(folded) || folded.startsWith('papers/')) throw new Error('Imported papers are read-only; write reviews and notes separately');

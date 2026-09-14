@@ -1,4 +1,4 @@
-import { access, copyFile, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { experimentDirectory, listSharedFiles, safePath } from './experiment-files.js';
@@ -6,6 +6,7 @@ import type { Paper } from '../shared/types.js';
 import { hostedPdfUrl, papersBaseUrl } from './paper-source.js';
 import { allowPrivatePaperHost, downloadPaperFile } from './paper-download.js';
 import { extractPdf, MAX_HOSTED_PDF_BYTES } from './pdf-extraction.js';
+import { copyPreparedPaper, paperStorageAllowance } from './paper-storage.js';
 let queue: Promise<unknown> = Promise.resolve();
 let nextFetchAt = 0;
 const inFlight = new Map<string, Promise<CachedPaper>>();
@@ -32,10 +33,10 @@ async function cache(dataDir: string, sessionId: string, paper: Pick<Paper, 'num
   const source = await preparedPaperDirectory(dataDir, sessionId, paper);
   if (source) {
     try {
-      await copyFile(safePath(source, pdfPath), join(root, pdfPath));
+      await copyPreparedPaper(safePath(source, pdfPath), join(root, pdfPath));
       try {
-        await copyFile(safePath(source, textPath), join(root, textPath));
-        await copyFile(safePath(source, `papers/${stem}.json`), metadata);
+        await copyPreparedPaper(safePath(source, textPath), join(root, textPath));
+        await copyPreparedPaper(safePath(source, `papers/${stem}.json`), metadata);
         return JSON.parse(await readFile(metadata, 'utf8')) as CachedPaper;
       } catch { /* PDF is available while extraction may still be running. */ }
     } catch { /* No prepared local PDF yet. */ }
@@ -49,7 +50,8 @@ async function cache(dataDir: string, sessionId: string, paper: Pick<Paper, 'num
     nextFetchAt = Date.now() + 3100;
     const temporary = join(directory, `.${stem}-${randomUUID()}.part`);
     try {
-      await downloadPaperFile(downloadUrl, temporary, { maxBytes: base ? MAX_HOSTED_PDF_BYTES : 50000000, timeoutMs: base ? 300000 : 90000, allowPrivate: base ? allowPrivatePaperHost(base) : false });
+      const maxBytes = Math.min(base ? MAX_HOSTED_PDF_BYTES : 50000000, await paperStorageAllowance(directory));
+      await downloadPaperFile(downloadUrl, temporary, { maxBytes, timeoutMs: base ? 300000 : 90000, allowPrivate: base ? allowPrivatePaperHost(base) : false });
       const handle = await open(temporary, 'r');
       try {
         const header = Buffer.alloc(1024);

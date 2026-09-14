@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, truncateSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, rmSync, truncateSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -10,7 +10,9 @@ import { downloadPaperFile } from '../src/server/paper-download.js';
 import { fetchHostedPapers } from '../src/server/paper-source.js';
 import { preparedPaperDirectory } from '../src/server/paper-cache.js';
 import { experimentDirectory } from '../src/server/experiment-files.js';
-import { extractPdf, MAX_HOSTED_PDF_BYTES } from '../src/server/pdf-extraction.js';
+import { extractPdf, MAX_HOSTED_PDF_BYTES, processResidentBytes } from '../src/server/pdf-extraction.js';
+import { copyPreparedPaper, paperStorageAllowance, PAPER_FREE_SPACE_FLOOR } from '../src/server/paper-storage.js';
+import { MAX_SHARED_TEXT_BYTES } from '../src/server/file-limits.js';
 import { downloadPapers } from '../scripts/download-papers.js';
 
 test('hosted manifest and PDF requests never follow redirects to another endpoint', async t => {
@@ -118,4 +120,40 @@ test('isolated PDF extraction rejects oversized inputs and enforces memory and t
     await assert.rejects(extractPdf(pdf, text, { worker: pathToFileURL(worker), memoryMb: 1, timeoutMs: 5000 }), /memory limit/);
     await assert.rejects(extractPdf(pdf, text, { worker: pathToFileURL(worker), timeoutMs: 30 }), /timed out/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('paper storage bounds cumulative files and reserves free space and extraction overhead', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mindspace-storage-'));
+  const overhead = MAX_SHARED_TEXT_BYTES + 65536;
+  try {
+    writeFileSync(join(root, '0001.pdf'), 'a'.repeat(100));
+    writeFileSync(join(root, '.interrupted.part'), 'b'.repeat(50));
+    const budget = { quotaBytes: overhead + 200, freeBytes: PAPER_FREE_SPACE_FLOOR + overhead + 1000 };
+    assert.equal(await paperStorageAllowance(root, budget), 50);
+    writeFileSync(join(root, '0002.pdf'), 'c'.repeat(50));
+    await assert.rejects(paperStorageAllowance(root, budget), /storage limit/);
+    await assert.rejects(paperStorageAllowance(root, { quotaBytes: overhead + 1000, freeBytes: PAPER_FREE_SPACE_FLOOR + overhead }), /storage limit/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('interrupted prepared copies never install partial PDFs and can be retried', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mindspace-copy-'));
+  const source = join(root, 'source.pdf'); const destination = join(root, 'papers', '0001.pdf');
+  mkdirSync(join(root, 'papers')); writeFileSync(source, '%PDF- complete');
+  try {
+    await assert.rejects(copyPreparedPaper(source, destination, async (_source, partial) => {
+      writeFileSync(partial, '%PDF- partial'); throw new Error('Interrupted copy');
+    }), /Interrupted copy/);
+    assert.equal(existsSync(destination), false);
+    assert.deepEqual(readdirSync(join(root, 'papers')), []);
+    await copyPreparedPaper(source, destination);
+    assert.equal(readFileSync(destination, 'utf8'), '%PDF- complete');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('resident memory supervision works without ps in PATH', async t => {
+  const previous = process.env.PATH;
+  t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
+  process.env.PATH = '';
+  assert(await processResidentBytes(process.pid) > 0);
 });
