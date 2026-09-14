@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parsePaperLinks, paperReviewExperiment } from '../src/server/arxiv.js';
@@ -236,4 +236,24 @@ test('agent paper listings omit large reviews and expose paths for paged reading
     assert.equal(text.hasMore, true);
     assert.equal(store.exportPapers(sessionId)[0].review, review.trim());
   } finally { await scheduler.shutdown(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test('pausing an experiment or reviewer cancels queued paper jobs before filesystem or network work', async () => {
+  for (const action of ['pause', 'pause-agent']) {
+    const directory = mkdtempSync(join(tmpdir(), 'mindspace-paper-cancel-'));
+    const store = new Store(join(directory, 'mindspace.sqlite'));
+    const scheduler = new Scheduler(store, () => { throw new Error('No model should start'); }, undefined, directory);
+    try {
+      const snapshot = store.createSession(input, store.createIdentity('Human'), 'simulation', papers);
+      const sessionId = snapshot.session.id;
+      const agent = snapshot.participants.find(p => p.kind === 'agent')!;
+      store.updateSession(sessionId, { status: 'running' });
+      const jobs = [1, 4].map(number => (scheduler as any).tool(agent, 'cache_paper', { paper_number: number }, `paper-${number}`).then(() => 'unexpected success', (error: Error) => error.message));
+      await scheduler.control(sessionId, action, agent.id);
+      const results = await Promise.all(jobs);
+      assert(results.every(result => /cancelled/.test(result)));
+      assert.equal(existsSync(join(experimentDirectory(directory, sessionId), 'papers')), false);
+    } finally { await scheduler.shutdown(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+  }
 });

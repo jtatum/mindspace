@@ -83,10 +83,13 @@ export async function preparedPaperDirectory(dataDir: string, sessionId: string,
   } catch { /* Missing or invalid source provenance: download the requested paper. */ }
 }
 
-export function cachePaper(dataDir: string, sessionId: string, paper: Pick<Paper, 'number' | 'url'>): Promise<CachedPaper> {
+export function cachePaper(dataDir: string, sessionId: string, paper: Pick<Paper, 'number' | 'url'>, options: { shouldStart?: () => boolean } = {}): Promise<CachedPaper> {
   const key = `${experimentDirectory(dataDir, sessionId)}:${paper.number}`;
   const existing = inFlight.get(key); if (existing) return existing;
-  const result = queue.then(() => cache(dataDir, sessionId, paper));
+  const result = queue.then(() => {
+    if (options.shouldStart && !options.shouldStart()) throw new Error('Queued paper download cancelled by pause or shutdown');
+    return cache(dataDir, sessionId, paper);
+  });
   queue = result.catch(() => {});
   inFlight.set(key, result);
   void result.finally(() => inFlight.delete(key)).catch(() => {});

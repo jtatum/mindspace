@@ -20,6 +20,7 @@ export class Scheduler {
   private delivering = new Set<string>();
   private messageSequences = new Map<string, number>();
   private generations = new Map<string, number>();
+  private paperGenerations = new Map<string, number>();
   private activityQueue = new Map<string, Activity>();
   private closed = false;
   private eventListener = (event: SessionEvent) => { if (event.type === 'message.created') this.onMessage(event.data as Message); };
@@ -43,6 +44,7 @@ export class Scheduler {
     this.schedule(key, () => { void this.deliver(sessionId, agentId); }, delay, true);
   }
   private async interruptAgent(agentId: string) {
+    this.paperGenerations.set(agentId, (this.paperGenerations.get(agentId) || 0) + 1);
     const active = this.active.get(agentId);
     if (!active) return;
     active.acceptsSteering = false;
@@ -240,7 +242,13 @@ export class Scheduler {
       const args = z.object({ paper_number: z.number().int().min(1) }).parse(rawArgs);
       const paper = this.store.readPapers(agent.sessionId, { after: args.paper_number - 1, limit: 1 }).papers[0];
       if (!paper || paper.number !== args.paper_number) throw new Error('Unknown paper');
-      return cachePaper(this.dataDir, agent.sessionId, paper);
+      const generation = this.generations.get(agent.sessionId) || 0;
+      const agentGeneration = this.paperGenerations.get(agent.id) || 0;
+      return cachePaper(this.dataDir, agent.sessionId, paper, { shouldStart: () =>
+        !this.closed && generation === (this.generations.get(agent.sessionId) || 0) &&
+        agentGeneration === (this.paperGenerations.get(agent.id) || 0) &&
+        this.store.getSession(agent.sessionId).status !== 'paused' &&
+        !this.store.getParticipant(agent.sessionId, agent.id).pausedByHuman });
     }
     if (name === 'read_papers' && agent.paperReview) {
       const args = z.object({ after_number: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(10).default(5), status: z.enum(['all', 'pending', 'reviewed', 'unavailable']).default('all'), assigned_to_self: z.boolean().default(false) }).parse(rawArgs);
