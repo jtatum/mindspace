@@ -244,7 +244,8 @@ export class Scheduler {
     }
     if (name === 'read_papers' && agent.paperReview) {
       const args = z.object({ after_number: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(10).default(5), status: z.enum(['all', 'pending', 'reviewed', 'unavailable']).default('all'), assigned_to_self: z.boolean().default(false) }).parse(rawArgs);
-      return this.store.readPapers(agent.sessionId, { after: args.after_number, limit: args.limit, status: args.status === 'all' ? undefined : args.status, reviewerId: args.assigned_to_self ? agent.id : undefined });
+      const page = this.store.readPapers(agent.sessionId, { after: args.after_number, limit: args.limit, status: args.status === 'all' ? undefined : args.status, reviewerId: args.assigned_to_self ? agent.id : undefined });
+      return { ...page, papers: page.papers.map(({ review, ...paper }) => ({ ...paper, reviewPath: review === null ? null : `reviews/${String(paper.number).padStart(4, '0')}.md` })) };
     }
     if (name === 'record_paper_review' && agent.paperReview) {
       const args = z.object({ paper_number: z.number().int().min(1), status: z.enum(['reviewed', 'unavailable']), review: z.string().trim().min(1).max(6000) }).parse(rawArgs);

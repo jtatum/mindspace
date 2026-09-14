@@ -214,3 +214,26 @@ test('existing local PDFs extract once and are reused without remote requests', 
     await assert.rejects(cachePaper(directory, 'test-session', { number: 2, url: 'http://127.0.0.1/private' }), /saved arXiv/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test('agent paper listings omit large reviews and expose paths for paged reading', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mindspace-paper-page-'));
+  const store = new Store(join(directory, 'mindspace.sqlite'));
+  const scheduler = new Scheduler(store, () => { throw new Error('No model should start'); }, undefined, directory);
+  try {
+    const snapshot = store.createSession(input, store.createIdentity('Human'), 'simulation', papers);
+    const sessionId = snapshot.session.id;
+    const agents = snapshot.participants.filter(p => p.kind === 'agent');
+    const review = 'Evidence '.repeat(22000);
+    for (let number = 1; number <= 10; number++) store.recordPaperReview(sessionId, agents[(number - 1) % 3].id, number, 'reviewed', review);
+    store.updateSession(sessionId, { status: 'running' });
+    const page = await (scheduler as any).tool(agents[0], 'read_papers', { limit: 10, status: 'reviewed' }, 'page');
+    assert.equal(page.papers.length, 10);
+    assert(Buffer.byteLength(JSON.stringify(page)) < 20000);
+    assert.equal(page.papers[0].review, undefined);
+    assert.equal(page.papers[0].reviewPath, 'reviews/0001.md');
+    const text = readSharedFile(experimentDirectory(directory, sessionId), page.papers[0].reviewPath);
+    assert.equal(text.hasMore, true);
+    assert.equal(store.exportPapers(sessionId)[0].review, review.trim());
+  } finally { await scheduler.shutdown(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
