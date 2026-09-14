@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { downloadPaperFile } from '../src/server/paper-download.js';
 import { fetchHostedPapers } from '../src/server/paper-source.js';
-import { preparedPaperDirectory } from '../src/server/paper-cache.js';
+import { cachePaper, preparedPaperDirectory } from '../src/server/paper-cache.js';
 import { experimentDirectory } from '../src/server/experiment-files.js';
 import { extractPdf, MAX_HOSTED_PDF_BYTES, processResidentBytes } from '../src/server/pdf-extraction.js';
 import { copyPreparedPaper, paperStorageAllowance, PAPER_FREE_SPACE_FLOOR } from '../src/server/paper-storage.js';
@@ -159,4 +159,20 @@ test('resident memory supervision works without ps in PATH', async t => {
   t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
   process.env.PATH = '';
   assert(await processResidentBytes(process.pid) > 0);
+});
+
+test('resuming a saved PDF reserves extraction capacity before starting the parser', async t => {
+  const data = mkdtempSync(join(tmpdir(), 'mindspace-retry-capacity-'));
+  const root = experimentDirectory(data, 'retry');
+  const previous = process.env.MINDSPACE_PAPER_CACHE_MAX_BYTES;
+  t.after(() => { if (previous === undefined) delete process.env.MINDSPACE_PAPER_CACHE_MAX_BYTES; else process.env.MINDSPACE_PAPER_CACHE_MAX_BYTES = previous; });
+  process.env.MINDSPACE_PAPER_CACHE_MAX_BYTES = '1024';
+  mkdirSync(join(root, 'papers'), { recursive: true });
+  writeFileSync(join(root, 'papers/0001.pdf'), '%PDF- saved before an extraction failure');
+  try {
+    await assert.rejects(cachePaper(data, 'retry', { number: 1, url: 'https://arxiv.org/abs/2609.00001' }), /storage limit/);
+    assert.equal(existsSync(join(root, 'papers/0001.txt')), false);
+    assert.equal(existsSync(join(root, 'papers/0001.json')), false);
+    assert.equal(existsSync(join(root, 'papers/0001.pdf')), true);
+  } finally { rmSync(data, { recursive: true, force: true }); }
 });

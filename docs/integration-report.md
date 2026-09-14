@@ -135,3 +135,5 @@ Agent paper listings now return review file paths instead of complete review bod
 Experiment creation now checks available disk space before inserting session rows or writing initial files, with a conservative reserve for database rows/indexes/WAL and corpus copies above the existing 2 GiB floor. The check applies to both creation routes and leaves execution limits unchanged. All 131 tests and the build pass.
 
 Creation now validates the combined initial README/JSONL/CSV against the configured shared quota before writing files; rejection rolls back session and paper rows. Prepared fixtures accept the same modern and legacy arXiv identifiers as hosted manifests. All 132 tests and the build pass, including rollback without orphan directories and publication/local reuse of a legacy arXiv source.
+
+Extraction retries now recheck the cache budget and free-space reserve even when the PDF is already saved. The regression verifies that an exhausted budget prevents text/metadata creation while preserving the completed PDF. All 133 tests and the build pass.

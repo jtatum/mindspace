@@ -64,6 +64,8 @@ async function cache(dataDir: string, sessionId: string, paper: Pick<Paper, 'num
       throw new Error(`PDF download failed; completed papers are preserved. ${error instanceof Error ? error.message : 'Retry later.'}`);
     } finally { await rm(temporary, { force: true }); }
   }
+  // Resumed PDFs still need room for text/metadata, even without a new download.
+  await paperStorageAllowance(directory);
   const extraction = await extractPdf(pdf, join(root, textPath));
   const result = { pdfPath, textPath, ...extraction };
   await writeFile(metadata, JSON.stringify(result), { mode: 0o600 });
