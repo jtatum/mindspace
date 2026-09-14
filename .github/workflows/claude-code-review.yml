@@ -20,8 +20,27 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Check whether the review workflow matches the default branch
+        id: review-config
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          # Claude's OIDC exchange only accepts the workflow on the default branch.
+          # Make that expected skip explicit before trying to run a review.
+          git fetch --no-tags --depth=1 origin "$DEFAULT_BRANCH"
+          git show FETCH_HEAD:.github/workflows/claude-code-review.yml > "$RUNNER_TEMP/default-claude-review.yml"
+          if cmp -s .github/workflows/claude-code-review.yml "$RUNNER_TEMP/default-claude-review.yml"; then
+            echo 'matches_default=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matches_default=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Claude review skipped: this PR changes the review workflow. A new review run is required after merge.'
+            echo '### Claude review skipped' >> "$GITHUB_STEP_SUMMARY"
+            echo 'This PR changes the review workflow. Claude requires it to match the default branch before running. No review was performed; run a new review after merging the workflow.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Run Claude Code Review
         id: claude-review
+        if: steps.review-config.outputs.matches_default == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -34,7 +53,7 @@ jobs:
           display_report: true
 
       - name: Verify Claude review completed without permission denials
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.review-config.outputs.matches_default == 'true' }}
         env:
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
         run: |
