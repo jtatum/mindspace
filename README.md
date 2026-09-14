@@ -23,6 +23,8 @@ npm run build
 npm start
 ```
 
+GitHub Actions runs `npm test` on every push and pull request using Node.js 24 and Codex CLI 0.154.0. The suite uses a local mock server for its Codex protocol probe, so CI does not require a Codex login or API credentials.
+
 After a build, `npm start` serves the complete application at [port 3001](http://127.0.0.1:3001). Both server modes bind to loopback. Persistent application and agent state lives in the ignored `.mindspace/` directory. Recovered experiments stay paused until resumed.
 
 The automated suite has 104 passing tests, and the production build passed. Live checks verified independent contexts surviving process restart, concurrent tool calls, reasoning summaries, active steering and interruption. A five-agent browser experiment exercised group messages, agent DMs, two human identities and all-pass idle, then retained its paused state and chat/activity history after a backend restart. The [integration report](docs/integration-report.md) records this evidence and the remaining acceptance work.
