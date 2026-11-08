@@ -13,6 +13,11 @@ export function isPublicAddress(address: string): boolean {
   return isIP(ip) === 6 && /^[23][0-9a-f]{3}:/.test(ip) && !ip.startsWith('2001:db8:') && !ip.startsWith('2001:0:') && !ip.startsWith('2002:');
 }
 
+// Decode &amp; last so escaped entity text such as "&amp;lt;" stays literal.
+export function htmlToText(html: string): string {
+  return html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/[ \t]+/g, ' ').trim();
+}
+
 export async function webFetch(rawUrl: string): Promise<{ url: string; text: string; truncated: boolean; fetchedAt: string }> {
   const deadline = Date.now() + 15000;
   let url = new URL(rawUrl);
@@ -52,7 +57,7 @@ export async function webFetch(rawUrl: string): Promise<{ url: string; text: str
     }
     if (response.status < 200 || response.status >= 300) throw new Error(`Page returned HTTP ${response.status}`);
     let text = response.body;
-    if (/html/i.test(response.contentType)) text = text.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/[ \t]+/g, ' ').trim();
+    if (/html/i.test(response.contentType)) text = htmlToText(text);
     return { url: url.href, text: text.slice(0, 24000), truncated: text.length > 24000, fetchedAt: new Date().toISOString() };
   }
   throw new Error('Fetch failed');
