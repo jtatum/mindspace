@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isPublicAddress, webFetch } from '../src/server/web-fetch.js';
+import { htmlToText, isPublicAddress, webFetch } from '../src/server/web-fetch.js';
 
 test('public-page fetch rejects local, private, link-local, shared and IPv6 mapped destinations', () => {
   for (const address of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '0.0.0.0', '100.64.0.1', '100.127.255.255', '198.18.0.1', '224.0.0.1', '255.255.255.255', '::1', '::', '::ffff:127.0.0.1', 'fe80::1', 'fc00::1', 'fd12::1', '2001:db8::1', '2002:7f00:1::', 'not-an-ip']) {
@@ -15,4 +15,9 @@ test('unsafe URL schemes, credentials and service ports are rejected before open
   for (const url of ['file:///etc/passwd', 'ftp://example.com/', 'https://user:password@example.com/', 'http://127.0.0.1:8787/api/sessions', 'http://example.com:8080/']) {
     await assert.rejects(webFetch(url), /Only public HTTP\/HTTPS URLs on standard ports are allowed/);
   }
+});
+
+test('HTML text extraction decodes each entity once, leaving escaped entity text literal', () => {
+  assert.equal(htmlToText('<p>Write &amp;lt;b&amp;gt; for &lt;b&gt;</p>'), 'Write &lt;b&gt; for <b>');
+  assert.equal(htmlToText('<style>p{}</style><p>Fish&nbsp;&amp;&nbsp;chips</p><script>x()</script>'), 'Fish & chips');
 });
